@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Excel Proxy</title>
+  <style>
+    :root { --bg: #0a0d10; --panel: #14181d; --line: #303840; --text: #e7ecf1; --muted: #a2afbc; --accent: #ff7a3a; --success: #63dcb2; --danger: #ff9999; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    button, select, input { font: inherit; }
+    button, select, input[type="search"] { min-height: 40px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); padding: 8px 12px; }
+    button { cursor: pointer; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:disabled, select:disabled { opacity: .55; cursor: default; }
+    button.primary { background: var(--accent); color: #17100b; border-color: var(--accent); font-weight: 600; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 24px; font-weight: 650; }
+    h2 { font-size: 18px; font-weight: 600; }
+    .muted { color: var(--muted); }
+    code, pre, .number { font-family: Consolas, "SF Mono", monospace; font-variant-numeric: tabular-nums; }
+    code { overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+    header { border-bottom: 1px solid var(--line); }
+    .header-inner, main { width: min(1200px, 100% - 64px); margin: 0 auto; }
+    .header-inner { min-height: 92px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+    main { padding: 32px 0 48px; }
+    .connection { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; padding-bottom: 28px; border-bottom: 1px solid var(--line); }
+    .session-title { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+    .status { color: var(--muted); font-size: 13px; }
+    .status.ok { color: var(--success); }
+    .status.error, .error { color: var(--danger); }
+    .session-copy { max-width: 540px; margin-bottom: 16px; }
+    .test-row { display: flex; gap: 12px; align-items: end; }
+    .field { flex: 1; min-width: 0; }
+    .field label { display: block; margin-bottom: 8px; color: var(--muted); }
+    select { width: 100%; }
+    .hint { margin-top: 8px; color: var(--muted); font-size: 13px; }
+    .feedback { margin-top: 12px; min-height: 22px; overflow-wrap: anywhere; }
+    .settings { border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+    summary { padding: 18px 0; font-weight: 600; cursor: pointer; }
+    .setting-row { padding: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid var(--line); }
+    .setting-row p { margin-top: 4px; color: var(--muted); }
+    .setting-row input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px; }
+    .setting-row label { cursor: pointer; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .usage { display: flex; flex-wrap: wrap; gap: 12px 32px; margin: 0 0 24px; }
+    .usage div { display: flex; gap: 12px; align-items: baseline; }
+    .usage dt { color: var(--muted); }
+    .usage dd { margin: 0; font-weight: 600; }
+    .table-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; white-space: nowrap; text-align: left; }
+    th, td { padding: 14px 12px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: 12px; font-weight: 500; }
+    th:first-child, td:first-child { padding-left: 0; }
+    th:last-child, td:last-child { text-align: right; padding-right: 0; }
+    tbody tr:hover { background: var(--panel); }
+    td button { min-height: 32px; padding: 3px 10px; }
+    .empty { padding: 48px 16px; text-align: center; color: var(--muted); white-space: normal; }
+    .pager { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; }
+    .prompt { margin-top: 24px; padding: 24px; background: var(--panel); border-radius: 12px; }
+    .prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 560px; overflow: auto; font-size: 13px; margin-bottom: 0; }
+    footer { margin-top: 32px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) {
+      .header-inner, main { width: calc(100% - 32px); }
+      .header-inner { min-height: 80px; }
+      .header-inner .muted { display: none; }
+      main { padding-top: 24px; }
+      .connection { grid-template-columns: 1fr; gap: 24px; }
+      .setting-row { align-items: start; gap: 16px; }
+      .setting-row .actions { justify-content: end; }
+      .section-heading { align-items: start; flex-direction: column; }
+      input[type="search"] { width: 100%; }
+      .usage { gap: 8px 24px; }
+      .prompt { padding: 16px; }
+    }
+    @media (prefers-reduced-motion: no-preference) { button { transition: border-color .15s; } }
+  </style>
+</head>
+<body>
+  <header><div class="header-inner">
+    <div><h1>Excel Proxy</h1><p class="muted">通过已登录的 ChatGPT Excel 会话连接 Codex</p></div>
+    <div class="toolbar"><span id="live-status" class="status" role="status">正在连接代理…</span><button id="refresh">刷新</button></div>
+  </div></header>
+  <main>
+    <p id="page-error" class="error" role="alert" hidden></p>
+    <section class="connection" aria-labelledby="session-heading">
+      <div>
+        <div class="session-title"><h2 id="session-heading">Excel 会话</h2><span id="session-status" class="status">正在读取…</span></div>
+        <p id="session-copy" class="session-copy muted">请在 Excel 桌面版中打开 ChatGPT 加载项并登录，再读取本机会话。</p>
+        <div class="toolbar"><button id="read-session" class="primary">读取 Excel 会话</button><button id="clear-session" disabled>清除缓存</button></div>
+        <p id="session-feedback" class="feedback" role="status"></p>
+      </div>
+      <div>
+        <div class="test-row"><div class="field"><label for="test-model">测试模型</label><select id="test-model" disabled><option>正在加载模型…</option></select></div><button id="test-connection" disabled>测试连接</button></div>
+        <p class="hint">手动发送一条简短请求，会消耗少量上游额度。</p>
+        <p id="test-feedback" class="feedback" role="status"></p>
+        <p class="hint">API 地址：<code>http://127.0.0.1:8000/v1</code></p>
+      </div>
+    </section>
+    <details class="settings">
+      <summary>Codex 与启动设置</summary>
+      <div class="setting-row"><div><strong>Codex 接入</strong><p id="codex-status">正在检查配置…</p><p>启用时保存原配置；更改后请重启 Codex。</p></div><div class="actions"><button id="enable-codex" disabled>启用接入</button><button id="disable-codex" disabled>恢复原配置</button></div></div>
+      <div class="setting-row"><div><label for="revert-setting">关闭代理时恢复原配置</label><p>下次启动代理时重新接入。</p></div><input id="revert-setting" type="checkbox" disabled></div>
+      <div class="setting-row"><div><label for="debug-setting">记录请求全文</label><p>用于查看提示词详情，默认关闭；仅在需要排查时启用。</p></div><input id="debug-setting" type="checkbox" disabled></div>
+      <div class="setting-row"><div><strong>登录后启动</strong><p id="startup-status">正在检查…</p></div><button id="toggle-startup" disabled>启用</button></div>
+      <div class="setting-row"><div><strong>启动与停止命令</strong><p id="commands-status">正在检查…</p></div><button id="toggle-commands" disabled>安装命令</button></div>
+      <p id="settings-feedback" class="feedback" role="status"></p>
+    </details>
+    <section aria-labelledby="requests-heading">
+      <div class="section-heading"><div><h2 id="requests-heading">最近请求</h2><p id="usage-period" class="muted">正在加载本月用量…</p></div><input id="request-filter" type="search" aria-label="筛选请求" placeholder="筛选模型、状态或请求 ID"></div>
+      <dl class="usage" aria-label="本月 Excel 用量"><div><dt>请求</dt><dd id="request-count" class="number">—</dd></div><div><dt>输入 token</dt><dd id="input-count" class="number">—</dd></div><div><dt>缓存命中</dt><dd id="cached-count" class="number">—</dd></div><div><dt>输出 token</dt><dd id="output-count" class="number">—</dd></div></dl>
+      <div class="table-wrap" role="region" aria-label="请求记录" tabindex="0"><table><thead><tr><th scope="col">时间</th><th scope="col">模型</th><th scope="col">状态</th><th scope="col">输入</th><th scope="col">缓存</th><th scope="col">输出</th><th scope="col">耗时</th><th scope="col">详情</th></tr></thead><tbody id="request-rows"><tr><td colspan="8" class="empty">正在加载请求记录…</td></tr></tbody></table></div>
+      <div class="pager"><span id="page-label" class="muted"></span><div class="toolbar"><button id="previous-page" disabled>上一页</button><button id="next-page" disabled>下一页</button></div></div>
+    </section>
+    <section id="prompt-panel" class="prompt" aria-labelledby="prompt-heading" hidden><div class="section-heading"><div><h2 id="prompt-heading">请求详情</h2><p id="prompt-id" class="muted"></p></div><button id="close-prompt">收起详情</button></div><pre id="prompt-content" tabindex="0"></pre></section>
+    <footer>此处统计经本代理发送的 Excel 请求。账户额度与费用以服务方记录为准。<span id="updated-at"></span></footer>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const number = value => Number(value || 0).toLocaleString('zh-CN');
+    const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+    const state = { rows: [], page: 0, pageSize: 50, session: null, settings: null, background: null, testing: false, loading: false, promptRequest: 0 };
+    const busy = new Set();
+    function feedback(id, text, error = false) { $(id).textContent = text; $(id).classList.toggle('error', error); }
+    async function api(path, options = {}) {
+      const response = await fetch(path, { cache: 'no-store', ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || payload.error?.message || (typeof payload.detail === 'string' ? payload.detail : `请求失败（HTTP ${response.status}）`));
+      return payload;
+    }
+    const post = (path, body, options = {}) => api(path, { method: 'POST', body: JSON.stringify(body), ...options });
+    function renderSession(payload) {
+      state.session = payload;
+      const ready = payload.configured && !payload.expired;
+      $('session-status').textContent = ready ? '会话已就绪' : payload.expired ? '会话已过期' : '尚未登录';
+      $('session-status').className = `status ${ready ? 'ok' : ''}`;
+      $('session-copy').textContent = ready ? `已读取本机会话。${payload.expires_at ? `有效期至 ${date(payload.expires_at * 1000)}。` : ''}${payload.persisted ? '会话已加密保存在本机。' : ''}` : '请在 Excel 桌面版中打开 ChatGPT 加载项并登录，再读取本机会话。';
+      $('clear-session').disabled = !payload.configured || busy.has('clear-session');
+      if (payload.models) {
+        const selected = $('test-model').value;
+        $('test-model').replaceChildren(...payload.models.map(model => new Option(model.display_name, model.id)));
+        $('test-model').value = payload.models.some(model => model.id === selected) ? selected : payload.default_model;
+      }
+      $('test-model').disabled = state.testing || !$('test-model').value;
+      $('test-connection').disabled = !ready || state.testing || !$('test-model').value;
+    }
+    function renderSettings(payload) {
+      if (payload.settings) state.settings = payload.settings;
+      const client = payload.clients?.codex;
+      if (client) {
+        $('codex-status').textContent = client.error || (client.configured ? '已连接 Excel Proxy' : '尚未启用');
+        $('codex-status').classList.toggle('error', Boolean(client.error));
+        $('enable-codex').disabled = busy.has('enable-codex');
+        $('enable-codex').textContent = client.configured ? '更新模型列表' : '启用接入';
+        $('disable-codex').disabled = !client.configured || busy.has('disable-codex');
+      }
+      if (state.settings) {
+        $('revert-setting').checked = state.settings.revert_on_shutdown;
+        $('debug-setting').checked = state.settings.debug_prompt_logging_enabled;
+        $('revert-setting').disabled = busy.has('revert-setting');
+        $('debug-setting').disabled = busy.has('debug-setting');
+      }
+    }
+    function renderBackground(payload) {
+      state.background = payload;
+      $('startup-status').textContent = !payload.startup_supported ? '当前系统不支持自动启动' : payload.startup_enabled ? '已启用' : '未启用';
+      $('toggle-startup').textContent = payload.startup_enabled ? '停用' : '启用';
+      $('toggle-startup').disabled = !payload.startup_supported || busy.has('toggle-startup');
+      $('commands-status').textContent = !payload.shell_commands_supported ? '当前系统不支持快捷命令' : payload.shell_commands_installed ? Object.values(payload.commands || {}).join(' / ') : '安装后可从终端启动和停止代理';
+      $('toggle-commands').textContent = payload.shell_commands_installed ? '移除命令' : '安装命令';
+      $('toggle-commands').disabled = !payload.shell_commands_supported || busy.has('toggle-commands');
+    }
+    function renderRows() {
+      const query = $('request-filter').value.trim().toLowerCase();
+      const rows = state.rows.filter(row => [row.resolved_model, row.requested_model, row.request_id, row.status_code].join(' ').toLowerCase().includes(query));
+      const pages = Math.max(1, Math.ceil(rows.length / state.pageSize));
+      state.page = Math.min(state.page, pages - 1);
+      const fragment = document.createDocumentFragment();
+      for (const row of rows.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize)) {
+        const tr = document.createElement('tr'); const usage = row.usage || {};
+        const cells = [date(row.started_at), row.resolved_model || row.requested_model || '—', row.status_code || '处理中', number(usage.input_tokens), number(usage.cached_input_tokens ?? usage.input_tokens_details?.cached_tokens), number(usage.output_tokens), row.duration_ms != null ? `${(row.duration_ms / 1000).toFixed(1)}s` : '—'];
+        cells.forEach((value, index) => { const td = document.createElement('td'); td.textContent = value; if (index > 2) td.className = 'number'; if (index === 2 && row.status_code >= 400) td.className = 'error'; tr.append(td); });
+        const td = document.createElement('td'); const button = document.createElement('button');
+        button.textContent = '查看'; button.disabled = !row.request_id; button.setAttribute('aria-label', `查看 ${row.resolved_model || '模型'} 的请求详情`); button.addEventListener('click', () => showPrompt(row)); td.append(button); tr.append(td); fragment.append(tr);
+      }
+      if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 8; td.className = 'empty'; td.textContent = query ? '没有匹配的请求，请调整筛选条件。' : '还没有 Excel 请求。连接会话并启用 Codex 后，在 Codex 中发起一次对话。'; tr.append(td); fragment.append(tr); }
+      $('request-rows').replaceChildren(fragment);
+      $('page-label').textContent = `${rows.length} 条记录 · 第 ${state.page + 1} / ${pages} 页`;
+      $('previous-page').disabled = state.page === 0; $('next-page').disabled = state.page >= pages - 1;
+    }
+    function renderUsage(payload) {
+      state.rows = payload.recent_requests || [];
+      const month = payload.current_month || {}; const usage = month.usage || {};
+      $('usage-period').textContent = `${month.label || '本月'} · Excel 用量`;
+      $('request-count').textContent = number(month.proxy_requests);
+      $('input-count').textContent = number(Number(usage.input_tokens || 0) + Number(usage.cached_input_tokens || 0));
+      $('cached-count').textContent = number(usage.cached_input_tokens);
+      $('output-count').textContent = number(usage.output_tokens);
+      $('updated-at').textContent = ` 更新于 ${date(payload.generated_at)}`;
+      renderRows();
+    }
+    async function refreshAll() {
+      if (state.loading) return;
+      state.loading = true; $('refresh').disabled = true; $('page-error').hidden = true;
+      const jobs = [['/api/config/excel-session', renderSession], ['/api/config/client-proxy', renderSettings], ['/api/config/background-proxy', renderBackground], ['/api/dashboard', renderUsage]];
+      const results = await Promise.allSettled(jobs.map(async ([path, render]) => render(await api(path))));
+      const failures = results.filter(result => result.status === 'rejected');
+      $('live-status').textContent = failures.length ? '部分数据读取失败' : '代理运行中';
+      $('live-status').className = `status ${failures.length ? 'error' : 'ok'}`;
+      if (failures.length) { feedback('page-error', `${failures[0].reason.message}。请确认代理正在运行，然后刷新。`, true); $('page-error').hidden = false; }
+      state.loading = false; $('refresh').disabled = false;
+    }
+    async function action(buttonId, feedbackId, work) {
+      if (busy.has(buttonId)) return;
+      busy.add(buttonId); $(buttonId).disabled = true; feedback(feedbackId, '正在处理…');
+      try { feedback(feedbackId, await work() || '已保存。'); }
+      catch (error) { feedback(feedbackId, error.message, true); }
+      finally { busy.delete(buttonId); $(buttonId).disabled = false; await refreshAll(); }
+    }
+    async function showPrompt(row) {
+      const sequence = ++state.promptRequest;
+      $('prompt-panel').hidden = false; $('prompt-id').textContent = row.request_id; $('prompt-content').textContent = '正在读取详情…'; $('close-prompt').focus();
+      try {
+        const payload = await api(`/api/request-prompt/${encodeURIComponent(row.request_id)}`);
+        if (sequence !== state.promptRequest) return;
+        const text = payload.prompt_text || (payload.request_prompt ? JSON.stringify(payload.request_prompt, null, 2) : '此请求未记录全文。需要查看后续请求的提示词时，请在设置中启用“记录请求全文”。');
+        $('prompt-content').textContent = `状态：${row.status_code || '处理中'}\n模型：${row.resolved_model || row.requested_model}\n\n${text}`;
+      } catch (error) { if (sequence === state.promptRequest) $('prompt-content').textContent = error.message; }
+    }
+    $('refresh').addEventListener('click', refreshAll);
+    $('read-session').addEventListener('click', () => action('read-session', 'session-feedback', async () => {
+      const payload = await post('/api/config/excel-session', { action: 'read_cached' }); renderSession(payload);
+      return payload.configured && !payload.expired ? '已读取 Excel 会话。可测试连接。' : '未找到有效会话，请登录 Excel 中的 ChatGPT 加载项后重试。';
+    }));
+    $('clear-session').addEventListener('click', () => action('clear-session', 'session-feedback', async () => { await api('/api/config/excel-session', { method: 'DELETE' }); return '已清除代理缓存。Excel 保持登录时，后续读取会重新载入会话。'; }));
+    $('test-model').addEventListener('change', () => feedback('test-feedback', ''));
+    $('test-connection').addEventListener('click', async () => {
+      if (state.testing) return;
+      state.testing = true; renderSession(state.session); feedback('test-feedback', '正在测试，最长等待 30 秒…');
+      try { const result = await post('/api/config/excel-session/test', { model: $('test-model').value }, { signal: AbortSignal.timeout(35000) }); feedback('test-feedback', result.ok ? '连接成功，所选模型已返回完整回复。' : result.message, !result.ok); }
+      catch (error) { feedback('test-feedback', error.name === 'TimeoutError' ? '测试超时，请检查连接后重试。' : error.message, true); }
+      finally { state.testing = false; renderSession(state.session); await refreshAll(); }
+    });
+    for (const [id, mode] of [['enable-codex', 'enable'], ['disable-codex', 'disable']]) $(id).addEventListener('click', () => action(id, 'settings-feedback', async () => {
+      const result = await post('/api/config/client-proxy', { target: 'codex', action: mode });
+      if (result.clients?.codex?.error) throw new Error(result.clients.codex.error);
+      return mode === 'enable' ? 'Codex 配置已更新，请重启 Codex。' : '已恢复原配置，请重启 Codex。';
+    }));
+    for (const id of ['revert-setting', 'debug-setting']) $(id).addEventListener('change', () => action(id, 'settings-feedback', async () => { await post('/api/config/client-proxy/settings', { revert_on_shutdown: $('revert-setting').checked, debug_prompt_logging_enabled: $('debug-setting').checked }); }));
+    $('toggle-startup').addEventListener('click', () => action('toggle-startup', 'settings-feedback', async () => { await post('/api/config/background-proxy', { action: state.background.startup_enabled ? 'disable_startup' : 'enable_startup' }); }));
+    $('toggle-commands').addEventListener('click', () => action('toggle-commands', 'settings-feedback', async () => { await post('/api/config/background-proxy', { action: state.background.shell_commands_installed ? 'uninstall_shell_commands' : 'install_shell_commands' }); }));
+    $('request-filter').addEventListener('input', () => { state.page = 0; renderRows(); });
+    $('previous-page').addEventListener('click', () => { state.page--; renderRows(); });
+    $('next-page').addEventListener('click', () => { state.page++; renderRows(); });
+    $('close-prompt').addEventListener('click', () => { state.promptRequest++; $('prompt-panel').hidden = true; $('request-filter').focus(); });
+    void refreshAll();
+    const refreshTimer = setInterval(() => { if (!document.hidden) void refreshAll(); }, 15000);
+    window.addEventListener('pagehide', () => clearInterval(refreshTimer));
+  </script>
+</body>
+</html>

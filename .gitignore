@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+.ghcp_proxy-cache.sqlite3
+.ghcp_proxy-cache*
+.tmp/
+.live-proxy*
+.playwright-mcp/
+.pytest_cache/
+.tmp-pytest/
+.tmp-ui-check.js
+
+# Test / runtime artifacts with unique IDs
+usage-log-*.jsonl
+usage-history-*.jsonl
+model-routing-*.json
+codex-config-*.toml
+claude-settings-*.json
+claude-settings-*.json.ghcp-proxy.bak.*
+codex-config-*.toml.ghcp-proxy.bak.*
