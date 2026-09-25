@@ -9,7 +9,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import windows_launcher as launcher
@@ -39,12 +39,56 @@ class DesktopLaunchTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     launcher.proxy_running()
 
-    def test_dashboard_is_checked_before_opening_browser(self):
-        with patch.object(launcher._OPENER, "open", side_effect=HTTPError(launcher.DASHBOARD_URL, 404, "Not found", {}, None)), \
-             patch.object(launcher.webbrowser, "open") as browser:
+    def test_closing_desktop_stops_the_proxy(self):
+        webview = MagicMock()
+        with patch.dict(sys.modules, {"webview": webview}), \
+             patch.object(launcher, "_desktop_instance", return_value=nullcontext(123)), \
+             patch.object(launcher, "_watch_activation"), \
+             patch.object(launcher._OPENER, "open"), \
+             patch.object(launcher, "start_proxy") as start, \
+             patch.object(launcher, "stop_proxy") as stop:
+            launcher._OPENER.open.return_value.__enter__.return_value.status = 200
+            launcher.open_dashboard()
+        start.assert_called_once()
+        webview.start.assert_called_once()
+        stop.assert_called_once()
+
+    def test_failed_window_initialization_cleans_up_the_proxy(self):
+        webview = MagicMock()
+        webview.start.side_effect = RuntimeError("WebView2 initialization failed")
+        with patch.dict(sys.modules, {"webview": webview}), \
+             patch.object(launcher, "_desktop_instance", return_value=nullcontext(123)), \
+             patch.object(launcher, "_watch_activation"), \
+             patch.object(launcher._OPENER, "open"), \
+             patch.object(launcher, "start_proxy"), \
+             patch.object(launcher, "stop_proxy") as stop:
+            launcher._OPENER.open.return_value.__enter__.return_value.status = 200
+            with self.assertRaisesRegex(RuntimeError, "WebView2 initialization failed"):
+                launcher.open_dashboard()
+        stop.assert_called_once()
+
+    def test_second_desktop_launch_leaves_the_existing_server_running(self):
+        webview = MagicMock()
+        with patch.dict(sys.modules, {"webview": webview}), \
+             patch.object(launcher, "_desktop_instance", return_value=nullcontext(None)), \
+             patch.object(launcher, "start_proxy") as start, \
+             patch.object(launcher, "stop_proxy") as stop:
+            launcher.open_dashboard()
+        start.assert_not_called()
+        webview.create_window.assert_not_called()
+        stop.assert_not_called()
+
+    def test_dashboard_is_checked_before_creating_the_window(self):
+        webview = MagicMock()
+        with patch.dict(sys.modules, {"webview": webview}), \
+             patch.object(launcher, "_desktop_instance", return_value=nullcontext(123)), \
+             patch.object(launcher, "start_proxy"), \
+             patch.object(launcher, "stop_proxy") as stop, \
+             patch.object(launcher._OPENER, "open", side_effect=HTTPError(launcher.DASHBOARD_URL, 404, "Not found", {}, None)):
             with self.assertRaises(HTTPError):
                 launcher.open_dashboard()
-        browser.assert_not_called()
+        webview.create_window.assert_not_called()
+        stop.assert_called_once()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows hidden process launch")
     def test_early_server_exit_is_reported(self):

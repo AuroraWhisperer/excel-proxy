@@ -17,15 +17,17 @@ Codex → 本地代理 → ChatGPT Excel 后端
 
 Windows 日常使用：
 
-1. 在 `D:\Work\ghcp_proxy` 双击 **启动.vbs**。代理在后台运行，准备好后自动打开仪表盘，全程不需要终端。
-2. 再次双击 **启动.vbs** 会打开已有实例的仪表盘。
-3. 双击 **停止.vbs** 正常关闭代理，并按设置恢复 Codex 原配置。关闭浏览器标签页不会停止代理。
+1. 在 `D:\Work\ghcp_proxy` 双击 **启动.vbs**，打开独立的 Excel Proxy 窗口，全程不需要终端。
+2. 再次双击 **启动.vbs** 会唤起已有窗口；最小化时代理继续运行。
+3. 点击窗口右上角的 **×** 即可退出，代理会正常关闭，并按设置恢复 Codex 原配置。
 
 启动失败会弹出错误提示。日志保存在 `%LOCALAPPDATA%\ghcp_proxy\ghcp-proxy.stderr.log` 和 `ghcp-proxy.stdout.log`。
 
 ### 首次安装或重建开发环境
 
 需要 Python 3.11+。在 Windows 或 macOS 的 Excel 桌面版中打开官方 ChatGPT 加载项并登录。
+
+Windows 独立窗口使用系统 WebView2 Runtime（本机已安装）。
 
 Windows PowerShell，在项目目录执行：
 
@@ -126,8 +128,7 @@ Excel 仍保持登录时，后续读取会重新载入本机会话。
 
 ```text
 ghcp_proxy/
-├── 启动.vbs              # Windows 双击启动并打开仪表盘
-├── 停止.vbs              # Windows 双击正常关闭
+├── 启动.vbs              # Windows 双击打开应用，关闭窗口即退出
 ├── app/                  # 代理源码与 Windows 启动器
 │   ├── proxy.py          # 服务入口
 │   ├── static/           # 仪表盘页面

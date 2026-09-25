@@ -12,14 +12,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from threading import Thread
+from threading import Event, Thread
 import time
 import traceback
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, build_opener
-import webbrowser
 
 from constants import (
+    CACHE_DIR,
     PROXY_BASE_URL,
     PROXY_PID_FILE,
     PROXY_STDERR_LOG_FILE,
@@ -67,6 +67,25 @@ def _launch_lock():
             yield
         finally:
             _kernel32.ReleaseMutex(handle)
+
+
+@contextmanager
+def _desktop_instance():
+    """Keep one window owner; subsequent launches activate its window."""
+    with _handle(_kernel32.CreateMutexW(None, False, f"{_OBJECT_PREFIX}-desktop")) as mutex, \
+         _handle(_kernel32.CreateEventW(None, False, False, f"{_OBJECT_PREFIX}-activate")) as activate:
+        status = _kernel32.WaitForSingleObject(mutex, 0)
+        if status == 0x102:  # WAIT_TIMEOUT: another process owns the window.
+            if not _kernel32.SetEvent(activate):
+                raise ctypes.WinError(ctypes.get_last_error())
+            yield None
+            return
+        if status not in (0, 0x80):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield activate
+        finally:
+            _kernel32.ReleaseMutex(mutex)
 
 
 @contextmanager
@@ -155,12 +174,46 @@ def stop_proxy() -> None:
         raise RuntimeError("代理仍在关闭，请稍后重试并查看错误日志。")
 
 
+def _watch_activation(window, activate, closed: Event) -> None:
+    while not closed.wait(0.1):
+        if _kernel32.WaitForSingleObject(activate, 0) == 0 and window.events.shown.is_set():
+            try:
+                window.restore()
+                window.show()
+            except Exception:
+                if not closed.is_set():
+                    raise
+
+
 def open_dashboard() -> None:
-    with _OPENER.open(DASHBOARD_URL, timeout=5) as response:
-        if response.status != 200:
-            raise RuntimeError("代理已启动，但仪表盘暂时无法打开。")
-    if not webbrowser.open(DASHBOARD_URL):
-        raise RuntimeError(f"代理已启动，请在浏览器打开 {DASHBOARD_URL}")
+    with _desktop_instance() as activate:
+        if activate is None:
+            return
+        import webview
+
+        start_proxy()
+        closed = Event()
+        activation_thread = None
+        try:
+            with _OPENER.open(DASHBOARD_URL, timeout=5) as response:
+                if response.status != 200:
+                    raise RuntimeError("代理已启动，但仪表盘暂时无法打开。")
+            window = webview.create_window(
+                "Excel Proxy", DASHBOARD_URL, width=1120, height=820,
+                min_size=(780, 600), background_color="#0a0d10",
+            )
+            window.events.closed += closed.set
+            activation_thread = Thread(
+                target=_watch_activation, args=(window, activate, closed),
+                name="desktop-activate", daemon=True,
+            )
+            activation_thread.start()
+            webview.start(gui="edgechromium", storage_path=str(Path(CACHE_DIR) / "desktop-webview"))
+        finally:
+            closed.set()
+            if activation_thread is not None:
+                activation_thread.join(timeout=1)
+            stop_proxy()
 
 
 def main() -> int:
@@ -170,8 +223,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.action == "start":
-            start_proxy()
-            if not args.no_browser:
+            if args.no_browser:
+                start_proxy()
+            else:
                 open_dashboard()
         else:
             stop_proxy()

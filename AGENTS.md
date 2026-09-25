@@ -10,8 +10,9 @@ starts with the current Excel-only application snapshot.
 
 The project lives at `D:\Work\ghcp_proxy`. Application modules and resources
 are in `app/`, offline regressions in `tests/`, and maintenance entrypoints in
-`tools/`. Windows users double-click `启动.vbs` or `停止.vbs`; both use the
-repository virtual environment and the shared `app/windows_launcher.py`.
+`tools/`. Windows users double-click `启动.vbs` to open the native dashboard
+window. Closing its title-bar X shuts down the proxy normally. The launcher
+uses the repository virtual environment and `app/windows_launcher.py`.
 For console debugging, run `.venv/Scripts/python.exe -B app/proxy.py`.
 Runtime settings and history remain in their existing AppData directories.
 

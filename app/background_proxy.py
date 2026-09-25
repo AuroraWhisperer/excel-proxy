@@ -246,7 +246,7 @@ class BackgroundProxyManager:
     def _windows_startup_cmd(self) -> str:
         pythonw = os.path.join(os.path.dirname(self.python_executable), "pythonw.exe")
         launcher = os.path.join(self.repo_dir, "app", "windows_launcher.py")
-        return f'@echo off\nchcp 65001 >nul\nstart "" "{pythonw}" -B "{launcher}" start --no-browser\n'
+        return f'@echo off\nchcp 65001 >nul\nstart "" "{pythonw}" -B "{launcher}" start\n'
 
     def _macos_launch_agent(self) -> str:
         os.makedirs(TOKEN_DIR, exist_ok=True)
@@ -290,12 +290,12 @@ class BackgroundProxyManager:
     def _powershell_profile_block(self) -> str:
         python = _quote_ps(os.path.join(os.path.dirname(self.python_executable), "pythonw.exe"))
         launcher = os.path.join(self.repo_dir, "app", "windows_launcher.py")
-        start_args = _quote_ps(f'-B "{launcher}" start --no-browser')
+        start_args = _quote_ps(f'-B "{launcher}" start')
         stop_args = _quote_ps(f'-B "{launcher}" stop')
         repo = _quote_ps(self.repo_dir)
         return f"""{START_MARKER}
 function Start-GHProxy {{
-    Start-Process -WindowStyle Hidden -FilePath {python} -ArgumentList {start_args} -WorkingDirectory {repo}
+    Start-Process -WindowStyle Normal -FilePath {python} -ArgumentList {start_args} -WorkingDirectory {repo}
     Write-Host 'Excel Proxy startup requested at http://127.0.0.1:8000'
 }}
 

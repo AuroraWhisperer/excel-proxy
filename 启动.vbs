@@ -14,4 +14,4 @@ If WScript.Arguments.Count > 0 Then
     If WScript.Arguments(0) = "--no-browser" Then arguments = arguments & " --no-browser"
 End If
 shell.CurrentDirectory = root
-shell.Run """" & python & """ -B """ & script & """" & arguments, 0, False
+shell.Run """" & python & """ -B """ & script & """" & arguments, 1, False
