@@ -278,7 +278,7 @@ class ExcelContinuityTests(unittest.TestCase):
 
         async def run():
             async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as remote, \
-                       httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://test") as local:
+                       httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://127.0.0.1") as local:
                 with patch.object(proxy, "_get_excel_upstream_client", return_value=remote), \
                      patch.object(proxy.excel_session_capture, "refresh_macos_excel_session"), \
                      patch.object(proxy.excel_session_capture, "refresh_windows_excel_session"), \

@@ -111,6 +111,36 @@ class ExcelUpstreamTests(unittest.TestCase):
         self.assertNotIn("max_output_tokens", body)
         self.assertEqual(body["reasoning"], {"effort": "xhigh", "summary": "auto"})
 
+    def test_default_compaction_threshold_matches_upstream_model(self):
+        expected = {
+            "gpt-6-astra-excel": 258_000,
+            "gpt-5.6-luna-excel": 200_000,
+            "gpt-5.6-terra-excel": 200_000,
+            "gpt-5.6-sol-excel": 200_000,
+        }
+        for model_id, threshold in expected.items():
+            with self.subTest(model=model_id):
+                body = excel_upstream.prepare_responses_body({
+                    "model": model_id,
+                    "input": "Hello",
+                })
+                self.assertEqual(body["context_management"], [
+                    {"type": "compaction", "compact_threshold": threshold},
+                ])
+
+    def test_explicit_context_management_is_preserved(self):
+        for context_management in (
+            [],
+            [{"type": "compaction", "compact_threshold": 245_000}],
+        ):
+            with self.subTest(context_management=context_management):
+                body = excel_upstream.prepare_responses_body({
+                    "model": "gpt-6-astra-excel",
+                    "input": "Hello",
+                    "context_management": context_management,
+                })
+                self.assertEqual(body["context_management"], context_management)
+
     def test_requested_summaries_use_the_excel_gateway_auto_mode(self):
         for summary in ("auto", "concise", "detailed"):
             with self.subTest(summary=summary):
@@ -823,7 +853,7 @@ class ExcelUpstreamTests(unittest.TestCase):
             "id": "fc_custom_prepare",
             "call_id": call_id,
             "name": "run_officejs",
-            "arguments": "{}",
+            "arguments": json.dumps({"code": json.dumps({"name": "apply_patch", "input": "patch"})}),
             "status": "completed",
         }
         excel_upstream._remember_native_call(native)

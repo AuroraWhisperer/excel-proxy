@@ -1,153 +1,139 @@
 # Excel Proxy
 
-个人私有仓库：[AuroraWhisperer/excel-proxy](https://github.com/AuroraWhisperer/excel-proxy)。独立维护，使用新的 Git 历史。
-
-通过已登录的 ChatGPT Excel 加载项，为 Codex 提供本地 Responses API。Excel 是唯一上游，无需 GitHub 账号、Copilot、Copilot SDK、Node.js 或 npx。
+Excel Proxy 是一个本地代理，让 Codex 使用 ChatGPT for Excel 的登录会话。你还是在 Codex 里提问、改代码和运行任务，代理负责把请求转成 Excel 后端接受的格式，再把回复传回来。
 
 ```text
-Codex → 本地代理 → ChatGPT Excel 后端
+Codex → 本机 Excel Proxy → ChatGPT Excel 后端
 ```
 
-代理仅监听本机回环地址：
+这是一个独立维护的个人项目，目前只接 Excel 后端。文件读取、代码修改和命令执行都由 Codex 客户端完成，代理本身不执行模型返回的代码。
 
-- 仪表盘：`http://127.0.0.1:8000/`
-- API：`http://127.0.0.1:8000/v1`
+## 目前能做什么
 
-## 安装与启动
+- 转发文本和图片请求，支持流式回复、工具调用和长对话的上下文压缩。
+- 提供图片生成和编辑接口，使用同一份 Excel 会话。
+- 在本地窗口里读取会话、测试连接、配置 Codex，以及查看最近请求。
+- 保存 Codex 原配置，退出代理时按设置恢复。
 
-Windows 日常使用：
+模型能否使用、还有多少额度，取决于你的账号和 Excel 后端。代理不会解锁权限，也不会在请求失败后偷偷换账号或模型。
 
-1. 在 `D:\Work\ghcp_proxy` 双击 **启动.vbs**，打开独立的 Excel Proxy 窗口，全程不需要终端。
-2. 再次双击 **启动.vbs** 会唤起已有窗口；最小化时代理继续运行。
-3. 点击窗口右上角的 **×** 即可退出，代理会正常关闭，并按设置恢复 Codex 原配置。
+## 第一次使用
 
-启动失败会弹出错误提示。日志保存在 `%LOCALAPPDATA%\ghcp_proxy\ghcp-proxy.stderr.log` 和 `ghcp-proxy.stdout.log`。
+先准备好：
 
-### 首次安装或重建开发环境
+- Excel 桌面版及官方 ChatGPT 加载项，在加载项里完成登录。
+- 已安装的 Codex。
+- Python 3.11 或更新版本。Windows 的独立窗口还需要 WebView2 Runtime。
 
-需要 Python 3.11+。在 Windows 或 macOS 的 Excel 桌面版中打开官方 ChatGPT 加载项并登录。
+### Windows
 
-Windows 独立窗口使用系统 WebView2 Runtime（本机已安装）。
-
-Windows PowerShell，在项目目录执行：
+把项目放在一个固定目录，在该目录打开 PowerShell，安装依赖：
 
 ```powershell
 py -3 -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-安装完成后双击 **启动.vbs**。需要在终端查看输出时可执行：
+已经能正常启动的环境可以跳过这一步。之后日常使用直接双击 **启动.vbs**。
 
-```powershell
-./.venv/Scripts/python.exe -B app/proxy.py
-```
+打开窗口后：
 
-macOS：
+1. 点 **读取 Excel 会话**，等页面显示“会话已就绪”。
+2. 选择模型，按需点 **测试连接**。这会发送一条真实短请求，消耗少量额度。
+3. 展开 **Codex 与启动设置**，点 **启用接入**。
+4. 重启 Codex，开一个新对话开始使用。
+
+已经接入过时，按钮会显示 **更新模型列表**。更新代理后可以点一次，再重启 Codex。
+
+### macOS
+
+在项目目录执行：
 
 ```bash
-python3 -m venv .venv
-./.venv/bin/python -m pip install -r requirements.txt
+bash tools/install_macos.sh
 ./.venv/bin/python -B app/proxy.py
 ```
 
-macOS 也可使用 `bash tools/install_macos.sh` 安装。打开仪表盘后：
+然后打开[本地控制面板](http://127.0.0.1:8000/)，按上面的步骤读取会话并接入 Codex。
 
-1. 点击 **读取 Excel 会话**。Windows 从 Office WebView2 缓存读取，并使用 DPAPI 保存；macOS 从 Excel 的 WebKit 存储读取。
-2. 选择模型，按需点击 **测试连接**。测试会发送一条短请求，消耗少量上游额度，不会自动执行。
-3. 展开 **Codex 与启动设置**，点击 **启用接入**，然后重启 Codex。
+## 启动、退出和恢复配置
 
-无需抓包、调试端口、自定义证书或修改系统代理。会话过期时，在 Excel 中刷新 ChatGPT 加载项，再重新读取。
+Windows 下，重复双击 **启动.vbs** 会唤起已有窗口。最小化时代理继续运行，点窗口右上角的 **×** 才会退出。
 
-## 模型与接口
+启用 Codex 接入时会先备份原配置。默认开启 **关闭代理时恢复原配置**，下次启动代理再重新接入。也可以在面板中点 **恢复原配置**，然后重启 Codex。
 
-`GET /v1/models` 返回本地 Excel 模型目录，不需要先登录：
+更新源码后，要等当前任务结束，关闭旧代理再重新启动。只重复打开启动器，仍然用的是之前那个进程。
 
-| 模型 ID | 推理级别 |
+本地控制面板在 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)，API 地址是 `http://127.0.0.1:8000/v1`。服务只监听本机，并检查连接和浏览器来源。
+
+## 模型和接口
+
+当前模型列表：
+
+- `gpt-6-astra-excel`
+- `gpt-5.6-sol-excel`（默认）
+- `gpt-5.6-terra-excel`
+- `gpt-5.6-luna-excel`
+
+模型出现在列表里，不代表当前账号一定有权限。可以先在面板测试。
+
+主要接口是 `/v1/responses`，另有模型列表、上下文压缩、图片生成和图片编辑接口。请求需要携带完整对话历史；目前不支持仅靠 `previous_response_id` 续接、强制指定工具或结构化 JSON 输出。
+
+看图支持内嵌 PNG、JPEG、GIF、WebP。每张最多 20 MiB，每个请求最多 20 张，内嵌图片合计最多 32 MiB，随历史一起发送的图片也计入。生图和图片编辑另有参数限制，详见[开发说明](docs/开发说明.md)。
+
+## 请求记录和费用
+
+首页的 **API 费用估算**按记录到的文本 token 和本地参考单价计算，用来了解大致用量。它不是实际账单，也不是 Excel 剩余额度；图片生成的费用不计入这里。
+
+**最近请求**有单独的页面，可以查看时间、模型、耗时和结果。列表最多展示最近 100 条，这个显示限制不会删除历史记录。
+
+需要排查提示词时，可以在设置里打开 **记录请求全文**，只对之后的请求生效，默认关闭。
+
+## 遇到问题先看这里
+
+| 情况 | 处理方法 |
 | --- | --- |
-| `gpt-6-astra-excel` | `medium`, `high`, `xhigh` |
-| `gpt-5.6-luna-excel` | `low`, `medium`, `high`, `xhigh` |
-| `gpt-5.6-terra-excel` | `low`, `medium`, `high`, `xhigh` |
-| `gpt-5.6-sol-excel` | `low`, `medium`, `high`, `xhigh` |
+| 找不到会话、会话过期或 401 | 在 Excel 的 ChatGPT 加载项里登录或刷新，再读取会话。 |
+| 上游提示模型没有权限或返回 403 | 换一个当前 Excel 账号可以使用的模型。 |
+| 本地返回 `local_access_required` | 从本机控制面板打开，不要通过其他网站或局域网地址调用。 |
+| 429 | 上游限流，稍后再试。 |
+| 工具转换失败或连接中断 | 先确认已重启新版代理和 Codex；仍有问题时，保留错误代码和对应请求时间。 |
+| 双击启动失败 | 查看弹窗和 `%LOCALAPPDATA%\ghcp_proxy\ghcp-proxy.stderr.log`。 |
 
-Responses 请求也接受去掉 `-excel` 的名称。省略模型时使用 `gpt-5.6-sol-excel`；未知模型返回 400，不会切换到其他后端。模型是否可用取决于当前 Excel 账号权限。
+更多操作说明放在[使用说明](docs/使用说明.md)里。
 
-保留的模型接口：
+## 数据保存在哪里
 
-- `POST /v1/responses`：文本、图片、流式回复和 Codex 工具调用。
-- `POST /v1/responses/compact`：压缩上下文，保留用户指令与可继续使用的摘要。
-- `GET /v1/models`：Excel 模型列表。
+Windows 的设置在 `%APPDATA%\ghcp_proxy`，会话、日志和历史记录在 `%LOCALAPPDATA%\ghcp_proxy`。Windows 会话使用系统加密保存；macOS 的代理会话只留在内存。
 
-上述接口也支持不带 `/v1` 的路径。Chat Completions、Anthropic Messages、GitHub 登录、模型重映射、Copilot 配额和自动更新接口已移除。
+点 **清除缓存**清除的是代理保存的登录会话，不会退出 Excel。Excel 仍然登录时，后续读取可以再次找到它。
 
-请求必须包含对话历史。`previous_response_id`、强制工具选择和结构化输出格式会明确返回 400。图片通过 Excel 附件接口上传，同一账号内复用缓存的文件 ID。工具调用、图片结果与加密推理状态可在后续回合重放。
+为了让工具任务在重启后继续，程序还会保存工具调用参数，里面可能有文件名、命令和代码。这个历史库与“记录请求全文”开关是两回事。消息和图片会发送到 OpenAI 的 Excel 后端处理。
 
-推理摘要请求统一使用 Excel 网关支持的 `auto` 模式；上游没有返回摘要时，代理不会生成虚构摘要。生成开始后的传输错误不会自动重放请求。上下文压缩失败时保留原始历史，客户端可以重试。
-
-## 仪表盘与配置
-
-仪表盘集中提供 Excel 会话读取、清除缓存、手动连接测试、Codex 配置、登录启动、终端快捷命令和请求详情。页面没有外部 CDN 依赖。
-
-启用 Codex 前会备份已有配置；**恢复原配置** 可撤销接入。默认关闭代理时恢复配置，下次启动时重新接入。升级已有代理配置会更新为 Excel 模型，保留最初的配置备份。
-
-为兼容已有配置和历史记录，继续使用 `ghcp_proxy` 数据目录、`GHCP_*` 环境变量和原有快捷命令名（Windows 为 `Start-GHProxy` / `Stop-GHProxy`，macOS 为 `start-ghproxy` / `stop-ghproxy`）。更新后重启代理，在仪表盘更新 Codex 接入，再重启 Codex。
-
-用量页面只统计经过代理的 Excel 请求，展示输入、缓存和输出 token。旧的其他后端记录不会混入统计。服务方的额度与费用记录为准。
-
-## 排查问题
-
-- **未找到会话 / 401**：打开 Excel，登录或刷新 ChatGPT 加载项，再读取会话。
-- **403 / 模型不可用**：改选该 Excel 账号有权使用的模型。
-- **429**：等待上游限流解除后重试。
-- **测试失败**：仪表盘会区分会话认证、模型权限、限流、请求兼容、响应不完整及超时。连接测试仅验证完整文本回复。
-- **查看提示词**：在设置中开启 **记录请求全文**，再从新的请求记录打开详情。默认关闭全文记录；错误响应不会转发上游的原始请求正文。
-
-通过本地 API 检查或清除代理缓存：
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/config/excel-session
-Invoke-RestMethod -Method Delete http://127.0.0.1:8000/api/config/excel-session
-```
-
-Excel 仍保持登录时，后续读取会重新载入本机会话。
-
-## 上游网络配置
-
-| 环境变量 | 用途 |
-| --- | --- |
-| `GHCP_UPSTREAM_TIMEOUT_SECONDS` | 非流式请求超时，默认 300 秒 |
-| `GHCP_UPSTREAM_PROXY` | HTTP/HTTPS 上游代理 |
-| `GHCP_HTTP_PROXY`, `GHCP_HTTPS_PROXY` | 分协议设置代理 |
-| `GHCP_NO_PROXY` | 不经过代理的主机 |
-| `GHCP_UPSTREAM_TLS_VERIFY` | TLS 证书校验开关 |
-
-标准 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 也会被读取。Excel 请求使用 HTTP/1.1，避免网关的 HTTP/2 流兼容问题。
-
-## 开发与验证
-
-目录按用途组织：
+## 目录
 
 ```text
 ghcp_proxy/
-├── 启动.vbs              # Windows 双击打开应用，关闭窗口即退出
-├── app/                  # 代理源码与 Windows 启动器
-│   ├── proxy.py          # 服务入口
-│   ├── static/           # 仪表盘页面
-│   └── prompts/          # Codex 提示词
-├── tests/                # 离线回归测试
-├── tools/                # 测试入口、安装和诊断脚本
-├── docs/                 # 说明与实施记录
-├── .venv/                # 本项目 Python 环境
-└── requirements.txt      # Python 依赖
+├── 启动.vbs          Windows 双击入口
+├── app/              程序、页面和提示词
+├── tests/            离线回归测试
+├── tools/            安装、测试和诊断脚本
+├── docs/             当前说明；旧记录在 archive/ 内
+├── requirements.txt  运行依赖
+└── .venv/            本项目的 Python 环境
 ```
 
-配置继续保存在 `%APPDATA%\ghcp_proxy`，会话、日志和历史记录继续保存在 `%LOCALAPPDATA%\ghcp_proxy`，不随源码目录调整而改变。项目路径改变后，已启用的登录启动或终端快捷命令需在仪表盘重新安装。
-
-运行隔离的离线回归，自动阻止真实 HTTP 传输：
+运行离线回归测试：
 
 ```powershell
 ./.venv/Scripts/python.exe -B tools/test-proxy-contracts.py
 ```
 
-macOS 使用 `./.venv/bin/python`。可在命令后追加 unittest 模块、类或方法名做定向检查。不运行广泛的 pytest 自动发现，也不搜索或修改生成的 `mutants/` 目录。
+macOS 使用 `./.venv/bin/python`。测试会隔离运行数据并阻止真实 HTTP 请求，不消耗模型额度。更详细的接口和维护说明见[开发说明](docs/开发说明.md)，以前的排查过程保存在[历史归档](docs/archive/README.md)。
 
-核心模块位于 `app/`：`proxy.py` 负责请求生命周期；`excel_upstream.py` 负责 Excel 协议；`excel_images.py` 处理附件；`excel_session_capture.py` 读取本机会话；`proxy_client_config.py` 管理 Codex 配置；`dashboard.py` 与 `static/dashboard.html` 提供本地用量和操作界面。
+## 参考与感谢
+
+- [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api)：参考了 Excel / Basispoints 适配、工具历史校验和图片请求限制。
+- [Kaixxrua/excel-codex-bridge](https://github.com/Kaixxrua/excel-codex-bridge)：参考了本地桥接、工具转换、图片附件上传和本机访问保护。
+
+感谢两个项目的作者和贡献者公开代码和测试，让这个项目少走了不少弯路。具体参考版本和本次改动记录在[参考项目与改进](docs/参考项目与改进.md)中。

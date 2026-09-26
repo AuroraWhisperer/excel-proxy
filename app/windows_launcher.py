@@ -10,12 +10,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from threading import Event, Thread
 import time
 import traceback
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from constants import (
@@ -113,6 +115,15 @@ def _request_stop():
 
 def proxy_running() -> bool:
     """Verify the service identity, including its runtime directory."""
+    # Windows can spend two seconds rejecting each connection to a closed
+    # loopback port. Bound only the TCP wait; a listening service must still
+    # pass the full identity check below, including its response timeout.
+    address = urlsplit(PROXY_BASE_URL)
+    try:
+        with socket.create_connection((address.hostname, address.port), timeout=0.2):
+            pass
+    except (ConnectionRefusedError, TimeoutError):
+        return False
     try:
         with _OPENER.open(f"{PROXY_BASE_URL}/api/config/background-proxy", timeout=5) as response:
             payload = json.load(response)

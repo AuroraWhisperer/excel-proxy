@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -94,6 +95,31 @@ class ExcelOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["current_month"]["proxy_requests"], 1)
         self.assertEqual([row["request_id"] for row in payload["recent_requests"]], ["excel-history"])
         self.assertNotIn("aic_quota", payload)
+
+    async def test_dashboard_limits_recent_requests_without_truncating_totals(self):
+        now = proxy.util.utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        events = [
+            {
+                "request_id": f"request-{index}",
+                "started_at": (now + timedelta(seconds=index)).isoformat(),
+                "finished_at": (now + timedelta(seconds=index)).isoformat(),
+                "requested_model": "gpt-6-astra-excel",
+                "status_code": 200,
+                "usage": {"input_tokens": 120, "output_tokens": 10},
+            }
+            for index in range(101)
+        ]
+        dependencies = proxy.dashboard_module.DashboardDependencies(
+            snapshot_all_usage_events=lambda: events,
+            snapshot_usage_events=lambda: events,
+        )
+        service = proxy.dashboard_module.create_dashboard_service(dependencies=dependencies)
+        payload = service.build_payload()
+        self.assertEqual(payload["current_month"]["proxy_requests"], 101)
+        self.assertEqual(
+            [row["request_id"] for row in payload["recent_requests"]],
+            [f"request-{index}" for index in range(100, 0, -1)],
+        )
 
     async def test_missing_session_keeps_excel_error(self):
         with patch.object(proxy.excel_session_capture, "refresh_macos_excel_session"), \

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import copy
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,80 @@ import excel_images
 
 
 class ExcelImageUploadTests(unittest.IsolatedAsyncioTestCase):
+    def picture(self, data=b"picture", media_type="image/png"):
+        return {"type": "input_image", "image_url":
+                f"data:{media_type};base64,{base64.b64encode(data).decode()}"}
+
+    async def test_invalid_later_picture_is_rejected_before_any_upload(self):
+        for image in (self.picture(media_type="image/svg+xml"), self.picture(b""),
+                      {"type": "input_image", "image_url": "data:image/png;base64,broken!"}):
+            with self.subTest(image=image):
+                body = copy.deepcopy(self.body)
+                body["input"][0]["content"].append(image)
+                with self.assertRaises(ValueError):
+                    await self.rewrite(body=body)
+        self.assertEqual(self.requests, [])
+
+    async def test_image_byte_and_count_limits_include_inline_tool_results(self):
+        for tool_output in (False, True):
+            for images, limits in (
+                ([self.picture(b"1234")], {"MAX_IMAGE_BYTES": 3}),
+                ([self.picture(b"12"), self.picture(b"34")], {"MAX_TOTAL_IMAGE_BYTES": 3}),
+                ([self.picture(), self.picture()], {"MAX_IMAGES": 1}),
+            ):
+                with self.subTest(tool_output=tool_output, limits=limits):
+                    item = ({"type": "function_call_output", "call_id": "call_image", "output": images}
+                            if tool_output else {"role": "user", "content": images})
+                    with patch.multiple(excel_images, create=True, **limits), self.assertRaises(ValueError):
+                        await self.rewrite(body={"input": [item]})
+        self.assertEqual(self.requests, [])
+
+    async def test_independent_pictures_do_not_wait_for_each_other(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def upload(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+                return "file-slow"
+            return "file-fast"
+
+        other = {"input": [{"role": "user", "content": [self.picture(b"different")]}]}
+        with patch.object(excel_images, "_upload", side_effect=upload):
+            slow = asyncio.create_task(self.rewrite())
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                fast, _ = await asyncio.wait_for(self.rewrite(body=other), 1)
+                self.assertEqual(fast["input"][0]["content"][0]["file_id"], "file-fast")
+            finally:
+                release.set()
+                await slow
+
+    async def test_concurrent_identical_pictures_share_one_upload(self):
+        result = await asyncio.gather(self.rewrite(), self.rewrite())
+        self.assertEqual(result[0][0], result[1][0])
+        self.assertEqual(len(self.requests), 1)
+
+    async def test_cancelled_upload_does_not_block_the_next_request(self):
+        entered = asyncio.Event()
+
+        async def upload(*args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with patch.object(excel_images, "_upload", side_effect=upload):
+            task = asyncio.create_task(self.rewrite())
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        await asyncio.wait_for(self.rewrite(), 1)
+        self.assertEqual(len(self.requests), 1)
+
     async def asyncSetUp(self):
         self.uploads = excel_images.ExcelImageUploads()
         self.requests = []

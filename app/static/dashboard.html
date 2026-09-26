@@ -5,81 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Excel Proxy</title>
-  <style>
-    :root { --bg: #0a0d10; --panel: #14181d; --line: #303840; --text: #e7ecf1; --muted: #a2afbc; --accent: #ff7a3a; --success: #63dcb2; --danger: #ff9999; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
-    button, select, input { font: inherit; }
-    button, select, input[type="search"] { min-height: 40px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); padding: 8px 12px; }
-    button { cursor: pointer; }
-    button:hover:not(:disabled) { border-color: var(--accent); }
-    button:disabled, select:disabled { opacity: .55; cursor: default; }
-    button.primary { background: var(--accent); color: #17100b; border-color: var(--accent); font-weight: 600; }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-    h1, h2, p { margin: 0; }
-    h1 { font-size: 24px; font-weight: 650; }
-    h2 { font-size: 18px; font-weight: 600; }
-    .muted { color: var(--muted); }
-    code, pre, .number { font-family: Consolas, "SF Mono", monospace; font-variant-numeric: tabular-nums; }
-    code { overflow-wrap: anywhere; }
-    [hidden] { display: none !important; }
-    header { border-bottom: 1px solid var(--line); }
-    .header-inner, main { width: min(1200px, 100% - 64px); margin: 0 auto; }
-    .header-inner { min-height: 92px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
-    main { padding: 32px 0 48px; }
-    .connection { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; padding-bottom: 28px; border-bottom: 1px solid var(--line); }
-    .session-title { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
-    .status { color: var(--muted); font-size: 13px; }
-    .status.ok { color: var(--success); }
-    .status.error, .error { color: var(--danger); }
-    .session-copy { max-width: 540px; margin-bottom: 16px; }
-    .test-row { display: flex; gap: 12px; align-items: end; }
-    .field { flex: 1; min-width: 0; }
-    .field label { display: block; margin-bottom: 8px; color: var(--muted); }
-    select { width: 100%; }
-    .hint { margin-top: 8px; color: var(--muted); font-size: 13px; }
-    .feedback { margin-top: 12px; min-height: 22px; overflow-wrap: anywhere; }
-    .settings { border-bottom: 1px solid var(--line); margin-bottom: 32px; }
-    summary { padding: 18px 0; font-weight: 600; cursor: pointer; }
-    .setting-row { padding: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid var(--line); }
-    .setting-row p { margin-top: 4px; color: var(--muted); }
-    .setting-row input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px; }
-    .setting-row label { cursor: pointer; }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-    .usage { display: flex; flex-wrap: wrap; gap: 12px 32px; margin: 0 0 24px; }
-    .usage div { display: flex; gap: 12px; align-items: baseline; }
-    .usage dt { color: var(--muted); }
-    .usage dd { margin: 0; font-weight: 600; }
-    .table-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
-    table { width: 100%; border-collapse: collapse; white-space: nowrap; text-align: left; }
-    th, td { padding: 14px 12px; border-bottom: 1px solid var(--line); }
-    th { color: var(--muted); font-size: 12px; font-weight: 500; }
-    th:first-child, td:first-child { padding-left: 0; }
-    th:last-child, td:last-child { text-align: right; padding-right: 0; }
-    tbody tr:hover { background: var(--panel); }
-    td button { min-height: 32px; padding: 3px 10px; }
-    .empty { padding: 48px 16px; text-align: center; color: var(--muted); white-space: normal; }
-    .pager { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; }
-    .prompt { margin-top: 24px; padding: 24px; background: var(--panel); border-radius: 12px; }
-    .prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 560px; overflow: auto; font-size: 13px; margin-bottom: 0; }
-    footer { margin-top: 32px; color: var(--muted); font-size: 12px; }
-    @media (max-width: 760px) {
-      .header-inner, main { width: calc(100% - 32px); }
-      .header-inner { min-height: 80px; }
-      .header-inner .muted { display: none; }
-      main { padding-top: 24px; }
-      .connection { grid-template-columns: 1fr; gap: 24px; }
-      .setting-row { align-items: start; gap: 16px; }
-      .setting-row .actions { justify-content: end; }
-      .section-heading { align-items: start; flex-direction: column; }
-      input[type="search"] { width: 100%; }
-      .usage { gap: 8px 24px; }
-      .prompt { padding: 16px; }
-    }
-    @media (prefers-reduced-motion: no-preference) { button { transition: border-color .15s; } }
-  </style>
+  <link rel="stylesheet" href="/ui/dashboard.css">
 </head>
 <body>
   <header><div class="header-inner">
@@ -87,6 +13,7 @@
     <div class="toolbar"><span id="live-status" class="status" role="status">正在连接代理…</span><button id="refresh">刷新</button></div>
   </div></header>
   <main>
+    <nav class="page-nav" aria-label="页面导航"><a href="/ui" aria-current="page">会话与额度</a><a href="/ui/requests">最近请求</a></nav>
     <p id="page-error" class="error" role="alert" hidden></p>
     <section class="connection" aria-labelledby="session-heading">
       <div>
@@ -102,6 +29,23 @@
         <p class="hint">API 地址：<code>http://127.0.0.1:8000/v1</code></p>
       </div>
     </section>
+    <section class="cost-estimate" aria-labelledby="cost-heading" id="cost-panel" aria-busy="true">
+      <div class="section-heading"><div class="session-title"><h2 id="cost-heading">API 费用估算</h2><span id="cost-status" class="status" role="status">正在读取…</span></div><span id="cost-month" class="muted">本月 · USD</span></div>
+      <p class="muted">按已记录的 token 用量与本地参考单价折算，不代表实际扣费，也不代表订阅剩余额度。</p>
+      <dl class="cost-breakdown">
+        <div class="cost-sum"><dt>本月已计价合计</dt><dd id="cost-total">—</dd></div>
+        <div><dt>普通输入</dt><dd id="cost-input">—</dd></div>
+        <div><dt>缓存读取</dt><dd id="cost-cached">—</dd></div>
+        <div><dt>缓存写入</dt><dd id="cost-write">—</dd></div>
+        <div><dt>输出</dt><dd id="cost-output">—</dd></div>
+      </dl>
+      <p id="cost-feedback" class="feedback" role="status">正在读取本月请求记录…</p>
+      <div class="table-wrap" role="region" aria-label="按模型的费用与用量" tabindex="0"><table class="cost-table"><thead><tr><th scope="col">模型</th><th scope="col">请求</th><th scope="col">普通输入</th><th scope="col">缓存读取</th><th scope="col">输出</th><th scope="col">估算费用</th></tr></thead><tbody id="cost-model-rows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody></table></div>
+      <details class="cost-rates"><summary>参考单价与计算口径</summary>
+        <p class="hint">以下为本地价格表，单位：美元 / 百万 token，未核实为当前官方报价。普通输入不含缓存读取；推理 token 已包含在输出中，不重复计费。单次请求超过长上下文阈值时使用对应单价，不按月累计用量触发。</p>
+        <div class="table-wrap" role="region" aria-label="模型参考单价" tabindex="0"><table class="cost-table"><thead><tr><th scope="col">模型 / 适用范围</th><th scope="col">普通输入</th><th scope="col">缓存读取</th><th scope="col">缓存写入</th><th scope="col">输出</th></tr></thead><tbody id="cost-rate-rows"><tr><td colspan="5" class="empty">正在加载…</td></tr></tbody></table></div>
+      </details>
+    </section>
     <details class="settings">
       <summary>Codex 与启动设置</summary>
       <div class="setting-row"><div><strong>Codex 接入</strong><p id="codex-status">正在检查配置…</p><p>启用时保存原配置；更改后请重启 Codex。</p></div><div class="actions"><button id="enable-codex" disabled>启用接入</button><button id="disable-codex" disabled>恢复原配置</button></div></div>
@@ -111,20 +55,13 @@
       <div class="setting-row"><div><strong>启动与停止命令</strong><p id="commands-status">正在检查…</p></div><button id="toggle-commands" disabled>安装命令</button></div>
       <p id="settings-feedback" class="feedback" role="status"></p>
     </details>
-    <section aria-labelledby="requests-heading">
-      <div class="section-heading"><div><h2 id="requests-heading">最近请求</h2><p id="usage-period" class="muted">正在加载本月用量…</p></div><input id="request-filter" type="search" aria-label="筛选请求" placeholder="筛选模型、状态或请求 ID"></div>
-      <dl class="usage" aria-label="本月 Excel 用量"><div><dt>请求</dt><dd id="request-count" class="number">—</dd></div><div><dt>输入 token</dt><dd id="input-count" class="number">—</dd></div><div><dt>缓存命中</dt><dd id="cached-count" class="number">—</dd></div><div><dt>输出 token</dt><dd id="output-count" class="number">—</dd></div></dl>
-      <div class="table-wrap" role="region" aria-label="请求记录" tabindex="0"><table><thead><tr><th scope="col">时间</th><th scope="col">模型</th><th scope="col">状态</th><th scope="col">输入</th><th scope="col">缓存</th><th scope="col">输出</th><th scope="col">耗时</th><th scope="col">详情</th></tr></thead><tbody id="request-rows"><tr><td colspan="8" class="empty">正在加载请求记录…</td></tr></tbody></table></div>
-      <div class="pager"><span id="page-label" class="muted"></span><div class="toolbar"><button id="previous-page" disabled>上一页</button><button id="next-page" disabled>下一页</button></div></div>
-    </section>
-    <section id="prompt-panel" class="prompt" aria-labelledby="prompt-heading" hidden><div class="section-heading"><div><h2 id="prompt-heading">请求详情</h2><p id="prompt-id" class="muted"></p></div><button id="close-prompt">收起详情</button></div><pre id="prompt-content" tabindex="0"></pre></section>
-    <footer>此处统计经本代理发送的 Excel 请求。账户额度与费用以服务方记录为准。<span id="updated-at"></span></footer>
+    <footer>会话保存在本机。账户额度与费用以服务方记录为准。</footer>
   </main>
   <script>
     const $ = id => document.getElementById(id);
     const number = value => Number(value || 0).toLocaleString('zh-CN');
     const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
-    const state = { rows: [], page: 0, pageSize: 50, session: null, settings: null, background: null, testing: false, loading: false, promptRequest: 0 };
+    const state = { session: null, settings: null, background: null, testing: false, loading: false };
     const busy = new Set();
     function feedback(id, text, error = false) { $(id).textContent = text; $(id).classList.toggle('error', error); }
     async function api(path, options = {}) {
@@ -175,40 +112,61 @@
       $('toggle-commands').textContent = payload.shell_commands_installed ? '移除命令' : '安装命令';
       $('toggle-commands').disabled = !payload.shell_commands_supported || busy.has('toggle-commands');
     }
-    function renderRows() {
-      const query = $('request-filter').value.trim().toLowerCase();
-      const rows = state.rows.filter(row => [row.resolved_model, row.requested_model, row.request_id, row.status_code].join(' ').toLowerCase().includes(query));
-      const pages = Math.max(1, Math.ceil(rows.length / state.pageSize));
-      state.page = Math.min(state.page, pages - 1);
+    const usd = value => Number.isFinite(value) ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 6 }) : '—';
+    function costRows(id, rows, columns) {
       const fragment = document.createDocumentFragment();
-      for (const row of rows.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize)) {
-        const tr = document.createElement('tr'); const usage = row.usage || {};
-        const cells = [date(row.started_at), row.resolved_model || row.requested_model || '—', row.status_code || '处理中', number(usage.input_tokens), number(usage.cached_input_tokens ?? usage.input_tokens_details?.cached_tokens), number(usage.output_tokens), row.duration_ms != null ? `${(row.duration_ms / 1000).toFixed(1)}s` : '—'];
-        cells.forEach((value, index) => { const td = document.createElement('td'); td.textContent = value; if (index > 2) td.className = 'number'; if (index === 2 && row.status_code >= 400) td.className = 'error'; tr.append(td); });
-        const td = document.createElement('td'); const button = document.createElement('button');
-        button.textContent = '查看'; button.disabled = !row.request_id; button.setAttribute('aria-label', `查看 ${row.resolved_model || '模型'} 的请求详情`); button.addEventListener('click', () => showPrompt(row)); td.append(button); tr.append(td); fragment.append(tr);
+      for (const values of rows) {
+        const tr = document.createElement('tr');
+        values.forEach((value, index) => {
+          const td = document.createElement('td'); td.textContent = value;
+          if (index) td.className = 'number';
+          tr.append(td);
+        });
+        fragment.append(tr);
       }
-      if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 8; td.className = 'empty'; td.textContent = query ? '没有匹配的请求，请调整筛选条件。' : '还没有 Excel 请求。连接会话并启用 Codex 后，在 Codex 中发起一次对话。'; tr.append(td); fragment.append(tr); }
-      $('request-rows').replaceChildren(fragment);
-      $('page-label').textContent = `${rows.length} 条记录 · 第 ${state.page + 1} / ${pages} 页`;
-      $('previous-page').disabled = state.page === 0; $('next-page').disabled = state.page >= pages - 1;
+      if (!rows.length) {
+        const tr = document.createElement('tr'); const td = document.createElement('td');
+        td.colSpan = columns; td.className = 'empty'; td.textContent = '本月暂无请求记录。'; tr.append(td); fragment.append(tr);
+      }
+      $(id).replaceChildren(fragment);
     }
-    function renderUsage(payload) {
-      state.rows = payload.recent_requests || [];
-      const month = payload.current_month || {}; const usage = month.usage || {};
-      $('usage-period').textContent = `${month.label || '本月'} · Excel 用量`;
-      $('request-count').textContent = number(month.proxy_requests);
-      $('input-count').textContent = number(Number(usage.input_tokens || 0) + Number(usage.cached_input_tokens || 0));
-      $('cached-count').textContent = number(usage.cached_input_tokens);
-      $('output-count').textContent = number(usage.output_tokens);
-      $('updated-at').textContent = ` 更新于 ${date(payload.generated_at)}`;
-      renderRows();
+    function renderCosts(payload) {
+      const cost = payload.current_month?.api_cost_estimate;
+      if (!cost) throw new Error('费用统计尚不可用，请在任务结束后重启代理');
+      $('cost-status').textContent = cost.complete ? '已更新' : '部分记录未计价';
+      $('cost-status').className = `status ${cost.complete ? 'ok' : 'error'}`;
+      $('cost-month').textContent = `${payload.current_month.label} · USD`;
+      $('cost-total').textContent = usd(cost.cost_usd);
+      for (const [id, key] of [['cost-input', 'input_fresh'], ['cost-cached', 'cached_input'], ['cost-write', 'cache_creation'], ['cost-output', 'output']]) {
+        $(id).textContent = cost.cost_usd == null ? '—' : usd(cost.cost_breakdown[key]);
+      }
+      const missing = [];
+      if (cost.unpriced_requests) missing.push(`${number(cost.unpriced_requests)} 次缺少单价`);
+      if (cost.missing_usage_requests) missing.push(`${number(cost.missing_usage_requests)} 次缺少用量`);
+      feedback('cost-feedback', `本月 ${number(cost.request_count)} 次请求，已计价 ${number(cost.priced_requests)} 次。${missing.length ? missing.join('；') + '，缺失项未按免费处理。' : '含记录到的失败请求用量。'} 更新于 ${date(payload.generated_at)}`, !cost.complete);
+      costRows('cost-model-rows', cost.models.map(row => [row.model, number(row.request_count),
+        number(row.input_tokens - row.cached_input_tokens), number(row.cached_input_tokens), number(row.output_tokens),
+        usd(row.cost_usd) + (row.complete ? '' : '（未完整计价）')]), 6);
+      const rates = [];
+      for (const row of cost.models) {
+        const rate = row.rates;
+        rates.push([row.model, ...['input_per_million', 'cached_input_per_million', 'cache_write_per_million', 'output_per_million'].map(key => usd(rate?.[key]))]);
+        if (rate?.long_context_threshold) rates.push([`${row.model} · 单次输入 > ${number(rate.long_context_threshold)}`,
+          ...['input', 'cached_input', 'cache_write', 'output'].map(key => usd(rate[`long_context_${key}_per_million`]))]);
+      }
+      costRows('cost-rate-rows', rates, 5);
     }
     async function refreshAll() {
       if (state.loading) return;
       state.loading = true; $('refresh').disabled = true; $('page-error').hidden = true;
-      const jobs = [['/api/config/excel-session', renderSession], ['/api/config/client-proxy', renderSettings], ['/api/config/background-proxy', renderBackground], ['/api/dashboard', renderUsage]];
+      $('cost-panel').setAttribute('aria-busy', 'true');
+      const jobs = [['/api/config/excel-session', renderSession], ['/api/config/client-proxy', renderSettings], ['/api/config/background-proxy', renderBackground], ['/api/dashboard', renderCosts]];
       const results = await Promise.allSettled(jobs.map(async ([path, render]) => render(await api(path))));
+      $('cost-panel').setAttribute('aria-busy', 'false');
+      if (results[3].status === 'rejected') {
+        $('cost-status').textContent = '更新失败'; $('cost-status').className = 'status error';
+        feedback('cost-feedback', '费用未能更新；已显示的数字可能是旧快照，请刷新重试。', true);
+      }
       const failures = results.filter(result => result.status === 'rejected');
       $('live-status').textContent = failures.length ? '部分数据读取失败' : '代理运行中';
       $('live-status').className = `status ${failures.length ? 'error' : 'ok'}`;
@@ -221,16 +179,6 @@
       try { feedback(feedbackId, await work() || '已保存。'); }
       catch (error) { feedback(feedbackId, error.message, true); }
       finally { busy.delete(buttonId); $(buttonId).disabled = false; await refreshAll(); }
-    }
-    async function showPrompt(row) {
-      const sequence = ++state.promptRequest;
-      $('prompt-panel').hidden = false; $('prompt-id').textContent = row.request_id; $('prompt-content').textContent = '正在读取详情…'; $('close-prompt').focus();
-      try {
-        const payload = await api(`/api/request-prompt/${encodeURIComponent(row.request_id)}`);
-        if (sequence !== state.promptRequest) return;
-        const text = payload.prompt_text || (payload.request_prompt ? JSON.stringify(payload.request_prompt, null, 2) : '此请求未记录全文。需要查看后续请求的提示词时，请在设置中启用“记录请求全文”。');
-        $('prompt-content').textContent = `状态：${row.status_code || '处理中'}\n模型：${row.resolved_model || row.requested_model}\n\n${text}`;
-      } catch (error) { if (sequence === state.promptRequest) $('prompt-content').textContent = error.message; }
     }
     $('refresh').addEventListener('click', refreshAll);
     $('read-session').addEventListener('click', () => action('read-session', 'session-feedback', async () => {
@@ -254,13 +202,15 @@
     for (const id of ['revert-setting', 'debug-setting']) $(id).addEventListener('change', () => action(id, 'settings-feedback', async () => { await post('/api/config/client-proxy/settings', { revert_on_shutdown: $('revert-setting').checked, debug_prompt_logging_enabled: $('debug-setting').checked }); }));
     $('toggle-startup').addEventListener('click', () => action('toggle-startup', 'settings-feedback', async () => { await post('/api/config/background-proxy', { action: state.background.startup_enabled ? 'disable_startup' : 'enable_startup' }); }));
     $('toggle-commands').addEventListener('click', () => action('toggle-commands', 'settings-feedback', async () => { await post('/api/config/background-proxy', { action: state.background.shell_commands_installed ? 'uninstall_shell_commands' : 'install_shell_commands' }); }));
-    $('request-filter').addEventListener('input', () => { state.page = 0; renderRows(); });
-    $('previous-page').addEventListener('click', () => { state.page--; renderRows(); });
-    $('next-page').addEventListener('click', () => { state.page++; renderRows(); });
-    $('close-prompt').addEventListener('click', () => { state.promptRequest++; $('prompt-panel').hidden = true; $('request-filter').focus(); });
-    void refreshAll();
-    const refreshTimer = setInterval(() => { if (!document.hidden) void refreshAll(); }, 15000);
-    window.addEventListener('pagehide', () => clearInterval(refreshTimer));
+    let refreshTimer;
+    window.addEventListener('pageshow', () => {
+      clearInterval(refreshTimer);
+      void refreshAll();
+      refreshTimer = setInterval(() => { if (!document.hidden) void refreshAll(); }, 15000);
+    });
+    window.addEventListener('pagehide', () => {
+      clearInterval(refreshTimer);
+    });
   </script>
 </body>
 </html>

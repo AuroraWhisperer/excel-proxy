@@ -21,7 +21,7 @@ import excel_upstream
 LEGACY_CODEX_PROXY_BASE_URL = "http://localhost:8000/v1"
 
 
-# User-supplied Codex prompt; the Excel transport protocol is added upstream.
+# Compact workspace defaults; dynamic context and the transport arrive separately.
 _EXCEL_CODEX_BASE_INSTRUCTIONS = (
     Path(__file__).parent / "prompts" / "codex-excel.md"
 ).read_text(encoding="utf-8").strip()
@@ -575,10 +575,18 @@ class ProxyClientConfigService:
             "model_context_window",
             "model_auto_compact_token_limit",
         }
+        provider = self._codex_provider_config(parsed)
+        existing_headers = provider.get("http_headers") if isinstance(provider, dict) else None
+        headers = dict(existing_headers) if isinstance(existing_headers, dict) else {}
+        headers.setdefault("x-openai-actor-authorization", "excel-proxy")
         provider_keys = {
             "name": _toml_basic_string("Excel"),
             "base_url": _toml_basic_string(CODEX_PROXY_BASE_URL),
             "wire_api": _toml_basic_string("responses"),
+            "http_headers": "{ " + ", ".join(
+                f"{_toml_basic_string(key)} = {_toml_basic_string(value)}"
+                for key, value in headers.items() if isinstance(value, str)
+            ) + " }",
         }
         provider_section_name = "model_providers.custom"
         lines = existing_content.splitlines()
@@ -626,6 +634,8 @@ class ProxyClientConfigService:
         rendered_sections: list[str] = []
         provider_section_found = False
         for section_name, section_lines in sections:
+            if section_name == provider_section_name + ".http_headers":
+                continue  # Preserve these values in the merged inline table.
             if section_name != provider_section_name:
                 rendered_sections.extend(section_lines)
                 continue

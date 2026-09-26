@@ -41,6 +41,12 @@ from util import (
 )
 from event_bus import EventBus
 
+try:
+    from codex_native_ingest import native_turn_metadata_for_rollout as _native_turn_metadata_for_rollout
+except Exception:
+    # Excel-only installs omit this module; do not search for it per history row.
+    _native_turn_metadata_for_rollout = None
+
 
 # ---------------------------------------------------------------------------
 
@@ -259,14 +265,12 @@ def _normalize_recorded_usage_event(
             normalized_event.pop("native_service_tier", None)
             normalized_event.pop("native_service_tier_source", None)
 
-        if (
+        if _native_turn_metadata_for_rollout is not None and (
             not isinstance(normalized_event.get("native_turn_duration_ms"), (int, float))
             or not normalized_event.get("native_turn_started_at")
         ):
             try:
-                from codex_native_ingest import native_turn_metadata_for_rollout
-
-                native_turn_metadata = native_turn_metadata_for_rollout(
+                native_turn_metadata = _native_turn_metadata_for_rollout(
                     normalized_event.get("native_rollout_path"),
                     normalized_event.get("native_turn_id"),
                 )
@@ -372,7 +376,26 @@ class SSEUsageCapture:
     def _has_text(self, value) -> bool:
         if not isinstance(value, str):
             return False
-        return bool(value.strip())
+        return bool(value)
+
+    def _has_part_output(self, part) -> bool:
+        return isinstance(part, dict) and any(
+            self._has_text(part.get(key))
+            for key in ("text", "input_text", "output_text", "refusal")
+        )
+
+    def _has_item_output(self, item) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if self._has_text(extract_item_text(item)):
+            return True
+        if item.get("type") in {"function_call", "custom_tool_call"}:
+            return any(self._has_text(item.get(key)) for key in ("arguments", "input"))
+        for key in ("content", "summary"):
+            parts = item.get(key)
+            if isinstance(parts, list) and any(self._has_part_output(part) for part in parts):
+                return True
+        return False
 
     def _consume_chat_payload(self, payload: dict) -> bool:
         if isinstance(payload.get("usage"), dict):
@@ -384,7 +407,7 @@ class SSEUsageCapture:
         from format_translation import extract_text_from_chat_delta
         return self._has_text(extract_text_from_chat_delta(delta))
 
-    def _consume_responses_payload(self, payload: dict) -> bool:
+    def consume_responses_payload(self, payload: dict) -> bool:
         event_type = str(payload.get("type", "")).strip().lower()
         if event_type in {"response.completed", "response.failed", "response.incomplete"}:
             self.terminal_event_seen = True
@@ -398,22 +421,30 @@ class SSEUsageCapture:
         elif isinstance(payload.get("usage"), dict):
             self.usage = normalize_usage_payload(payload["usage"])
 
-        has_output = False
-        if event_type == "response.output_text.delta":
-            has_output = self._has_text(payload.get("delta"))
-        if event_type == "response.output_text.done":
-            has_output = self._has_text(payload.get("text"))
-        if event_type == "response.output_item.added":
-            item = payload.get("item")
-            if isinstance(item, dict):
-                has_output = self._has_text(extract_item_text(item))
-        if event_type == "response.content_part.added":
-            part = payload.get("part")
-            if isinstance(part, dict):
-                has_output = self._has_text(
-                    part.get("text") or part.get("input_text") or part.get("output_text")
-                )
-        return has_output
+        # Lifecycle events and empty item shells are not generated tokens.
+        # Tools and reasoning are output too, even when no prose is emitted.
+        if event_type in {
+            "response.output_text.delta", "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta", "response.refusal.delta",
+            "response.function_call_arguments.delta", "response.custom_tool_call_input.delta",
+        }:
+            return self._has_text(payload.get("delta"))
+        if event_type in {
+            "response.output_text.done", "response.reasoning_text.done",
+            "response.reasoning_summary_text.done", "response.refusal.done",
+            "response.function_call_arguments.done", "response.custom_tool_call_input.done",
+        }:
+            return any(self._has_text(payload.get(key)) for key in ("text", "refusal", "arguments", "input"))
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            return self._has_item_output(payload.get("item"))
+        if event_type in {
+            "response.content_part.added", "response.content_part.done",
+            "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+        }:
+            return self._has_part_output(payload.get("part"))
+        if isinstance(response, dict) and isinstance(response.get("output"), list):
+            return any(self._has_item_output(item) for item in response["output"])
+        return False
 
     def feed(self, chunk) -> bool:
         if isinstance(chunk, bytes):
@@ -428,7 +459,7 @@ class SSEUsageCapture:
         while "\n\n" in normalized:
             raw_block, normalized = normalized.split("\n\n", 1)
             from format_translation import parse_sse_block
-            _event_name, data = parse_sse_block(raw_block)
+            event_name, data = parse_sse_block(raw_block)
             if data == "[DONE]":
                 self.terminal_event_seen = True
                 if self.terminal_event_type is None:
@@ -442,10 +473,14 @@ class SSEUsageCapture:
                 payload = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(payload, dict):
+                continue
             if self.stream_type == "chat":
                 saw_output = self._consume_chat_payload(payload) or saw_output
             else:
-                saw_output = self._consume_responses_payload(payload) or saw_output
+                if event_name:
+                    payload["type"] = event_name
+                saw_output = self.consume_responses_payload(payload) or saw_output
 
         self.buffer = normalized
         return saw_output
@@ -532,9 +567,7 @@ class UsageTracker:
         the existing in-memory rows from the rollout metadata before exposing
         dashboard snapshots.
         """
-        try:
-            from codex_native_ingest import native_turn_metadata_for_rollout
-        except Exception:
+        if _native_turn_metadata_for_rollout is None:
             return
 
         events = (*self.state.archived_usage_events, *self.state.recent_usage_events)
@@ -552,7 +585,7 @@ class UsageTracker:
             if event.get("native_turn_completed_at") or event.get("native_turn_duration_ms") is not None:
                 continue
             try:
-                metadata = native_turn_metadata_for_rollout(path, turn_id)
+                metadata = _native_turn_metadata_for_rollout(path, turn_id)
             except Exception:
                 continue
             for key, value in metadata.items():
@@ -954,13 +987,16 @@ class UsageTracker:
                             loaded_events.append(normalized_event)
 
                 loaded_events = deduplicate_usage_events(loaded_events)
-                self.state.recent_usage_events.clear()
-                self._rebuild_native_usage_event_dedupe_keys_locked()
+                if self.state.recent_usage_events:
+                    self.state.recent_usage_events.clear()
+                    self._rebuild_native_usage_event_dedupe_keys_locked()
+                # At startup the archive loader has already built these keys;
+                # only a reload needs to remove keys from replaced recent rows.
                 for event in loaded_events:
                     if self._register_native_usage_event_locked(event):
                         self.state.recent_usage_events.append(event)
                 self.state.all_usage_events_snapshot = None
-                self.state.recent_usage_events_snapshot = None
+                self.state.recent_usage_events_snapshot = list(self.state.recent_usage_events)
         except OSError:
             return
 

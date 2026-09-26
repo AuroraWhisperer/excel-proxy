@@ -65,7 +65,7 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                                   content=summary_stream(body["prompt_cache_key"]))
 
         self.remote = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
-        self.local = httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://test")
+        self.local = httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://127.0.0.1")
         self.addAsyncCleanup(self.remote.aclose)
         self.addAsyncCleanup(self.local.aclose)
         patches = self.enterContext(ExitStack())

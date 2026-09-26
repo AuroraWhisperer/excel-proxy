@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>最近请求 · Excel Proxy</title>
+  <link rel="stylesheet" href="/ui/dashboard.css">
+</head>
+<body>
+  <header><div class="header-inner">
+    <div><h1>Excel Proxy</h1><p class="muted">通过已登录的 ChatGPT Excel 会话连接 Codex</p></div>
+    <div class="toolbar"><span id="live-status" class="status" role="status">正在连接代理…</span><button id="refresh">刷新</button></div>
+  </div></header>
+  <main>
+    <nav class="page-nav" aria-label="页面导航"><a href="/ui">会话与额度</a><a href="/ui/requests" aria-current="page">最近请求</a></nav>
+    <p id="page-error" class="error" role="alert" hidden></p>
+    <section aria-labelledby="requests-heading">
+      <div class="section-heading"><div><h2 id="requests-heading">最近请求</h2><p id="usage-period" class="muted">正在加载本月用量…</p></div><input id="request-filter" type="search" aria-label="筛选请求" placeholder="筛选模型、状态或请求 ID"></div>
+      <dl class="usage" aria-label="本月 Excel 用量"><div><dt>请求</dt><dd id="request-count" class="number">—</dd></div><div><dt>输入 token</dt><dd id="input-count" class="number">—</dd></div><div><dt>缓存命中</dt><dd id="cached-count" class="number">—</dd></div><div><dt>输出 token</dt><dd id="output-count" class="number">—</dd></div></dl>
+      <div class="table-wrap" role="region" aria-label="请求记录" tabindex="0"><table><thead><tr><th scope="col">时间</th><th scope="col">模型</th><th scope="col">状态</th><th scope="col">输入</th><th scope="col">缓存</th><th scope="col">输出</th><th scope="col" title="从代理开始计时到收到上游首个有效输出（正文、推理或工具调用），包含排队和网络等待，不计心跳。非流式 JSON 记录完整响应到达时间；历史缺失或无输出显示 —。">首字</th><th scope="col">耗时</th><th scope="col">详情</th></tr></thead><tbody id="request-rows"><tr><td colspan="9" class="empty">正在加载请求记录…</td></tr></tbody></table></div>
+      <div class="pager"><span id="page-label" class="muted"></span><div class="toolbar"><button id="previous-page" disabled>上一页</button><button id="next-page" disabled>下一页</button></div></div>
+    </section>
+    <section id="prompt-panel" class="prompt" aria-labelledby="prompt-heading" hidden><div class="section-heading"><div><h2 id="prompt-heading">请求详情</h2><p id="prompt-id" class="muted"></p></div><button id="close-prompt">收起详情</button></div><pre id="prompt-content" tabindex="0"></pre></section>
+    <footer>此处统计经本代理发送的 Excel 请求。账户额度与费用以服务方记录为准。<span id="updated-at"></span></footer>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const number = value => Number(value || 0).toLocaleString('zh-CN');
+    const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+    const state = { rows: [], page: 0, pageSize: 50, loading: false, promptRequest: 0 };
+    function feedback(id, text, error = false) { $(id).textContent = text; $(id).classList.toggle('error', error); }
+    async function api(path, options = {}) {
+      const response = await fetch(path, { cache: 'no-store', ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || payload.error?.message || (typeof payload.detail === 'string' ? payload.detail : `请求失败（HTTP ${response.status}）`));
+      return payload;
+    }
+    function renderRows() {
+      const query = $('request-filter').value.trim().toLowerCase();
+      const rows = state.rows.filter(row => [row.resolved_model, row.requested_model, row.request_id, row.status_code].join(' ').toLowerCase().includes(query));
+      const pages = Math.max(1, Math.ceil(rows.length / state.pageSize));
+      state.page = Math.min(state.page, pages - 1);
+      const fragment = document.createDocumentFragment();
+      for (const row of rows.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize)) {
+        const tr = document.createElement('tr'); const usage = row.usage || {};
+        const cells = [date(row.started_at), row.resolved_model || row.requested_model || '—', row.status_code || '处理中', number(usage.input_tokens), number(usage.cached_input_tokens ?? usage.input_tokens_details?.cached_tokens), number(usage.output_tokens), row.time_to_first_token_ms != null ? `${(row.time_to_first_token_ms / 1000).toFixed(1)}s` : '—', row.duration_ms != null ? `${(row.duration_ms / 1000).toFixed(1)}s` : '—'];
+        cells.forEach((value, index) => { const td = document.createElement('td'); td.textContent = value; if (index > 2) td.className = 'number'; if (index === 2 && row.status_code >= 400) td.className = 'error'; tr.append(td); });
+        const td = document.createElement('td'); const button = document.createElement('button');
+        button.textContent = '查看'; button.disabled = !row.request_id; button.setAttribute('aria-label', `查看 ${row.resolved_model || '模型'} 的请求详情`); button.addEventListener('click', () => showPrompt(row)); td.append(button); tr.append(td); fragment.append(tr);
+      }
+      if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 9; td.className = 'empty'; td.textContent = query ? '没有匹配的请求，请调整筛选条件。' : '还没有 Excel 请求。连接会话并启用 Codex 后，在 Codex 中发起一次对话。'; tr.append(td); fragment.append(tr); }
+      $('request-rows').replaceChildren(fragment);
+      $('page-label').textContent = `${rows.length} 条记录 · 第 ${state.page + 1} / ${pages} 页`;
+      $('previous-page').disabled = state.page === 0; $('next-page').disabled = state.page >= pages - 1;
+    }
+    function renderUsage(payload) {
+      state.rows = payload.recent_requests || [];
+      const month = payload.current_month || {}; const usage = month.usage || {};
+      $('usage-period').textContent = `${month.label || '本月'} · Excel 用量`;
+      $('request-count').textContent = number(month.proxy_requests);
+      $('input-count').textContent = number(Number(usage.input_tokens || 0) + Number(usage.cached_input_tokens || 0));
+      $('cached-count').textContent = number(usage.cached_input_tokens);
+      $('output-count').textContent = number(usage.output_tokens);
+      $('updated-at').textContent = ` 更新于 ${date(payload.generated_at)}`;
+      renderRows();
+    }
+    async function refreshAll() {
+      if (state.loading) return;
+      state.loading = true; $('refresh').disabled = true; $('page-error').hidden = true;
+      const jobs = [['/api/dashboard', renderUsage]];
+      const results = await Promise.allSettled(jobs.map(async ([path, render]) => render(await api(path))));
+      const failures = results.filter(result => result.status === 'rejected');
+      $('live-status').textContent = failures.length ? '部分数据读取失败' : '代理运行中';
+      $('live-status').className = `status ${failures.length ? 'error' : 'ok'}`;
+      if (failures.length) { feedback('page-error', `${failures[0].reason.message}。请确认代理正在运行，然后刷新。`, true); $('page-error').hidden = false; }
+      state.loading = false; $('refresh').disabled = false;
+    }
+    async function showPrompt(row) {
+      const sequence = ++state.promptRequest;
+      $('prompt-panel').hidden = false; $('prompt-id').textContent = row.request_id; $('prompt-content').textContent = '正在读取详情…'; $('close-prompt').focus();
+      try {
+        const payload = await api(`/api/request-prompt/${encodeURIComponent(row.request_id)}`);
+        if (sequence !== state.promptRequest) return;
+        const text = payload.prompt_text || (payload.request_prompt ? JSON.stringify(payload.request_prompt, null, 2) : '此请求未记录全文。需要查看后续请求的提示词时，请在设置中启用“记录请求全文”。');
+        $('prompt-content').textContent = `状态：${row.status_code || '处理中'}\n模型：${row.resolved_model || row.requested_model}\n\n${text}`;
+      } catch (error) { if (sequence === state.promptRequest) $('prompt-content').textContent = error.message; }
+    }
+    $('refresh').addEventListener('click', refreshAll);
+    $('request-filter').addEventListener('input', () => { state.page = 0; renderRows(); });
+    $('previous-page').addEventListener('click', () => { state.page--; renderRows(); });
+    $('next-page').addEventListener('click', () => { state.page++; renderRows(); });
+    $('close-prompt').addEventListener('click', () => { state.promptRequest++; $('prompt-panel').hidden = true; $('request-filter').focus(); });
+    let refreshTimer;
+    window.addEventListener('pageshow', () => {
+      clearInterval(refreshTimer);
+      void refreshAll();
+      refreshTimer = setInterval(() => { if (!document.hidden) void refreshAll(); }, 15000);
+    });
+    window.addEventListener('pagehide', () => {
+      clearInterval(refreshTimer);
+    });
+  </script>
+</body>
+</html>

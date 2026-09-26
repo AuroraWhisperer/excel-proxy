@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -13,6 +14,7 @@ from unittest import mock
 import excel_upstream
 from excel_session_capture import (
     _decompress_snappy,
+    _windows_leveldb_paths,
     load_macos_excel_session,
     load_windows_excel_session,
     refresh_macos_excel_session,
@@ -153,6 +155,32 @@ class MacLocalStorageCaptureTests(unittest.TestCase):
 
 
 class WindowsLocalStorageCacheTests(unittest.TestCase):
+    def test_profile_discovery_skips_browser_cache_subtrees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            older = root / "nested" / "profile" / "EBWebView" / "Default" / "Local Storage" / "leveldb"
+            newer = root / "another" / "EBWebView" / "Default" / "Local Storage" / "leveldb"
+            for path in (older, newer):
+                path.mkdir(parents=True)
+            os.utime(older, (1000, 1000))
+            os.utime(newer, (2000, 2000))
+            cache = root / "another" / "EBWebView" / "Default" / "Cache"
+            cache.mkdir()
+            visited = []
+            original_scandir = os.scandir
+
+            def scan(path):
+                visited.append(Path(path))
+                return original_scandir(path)
+
+            with mock.patch("os.scandir", side_effect=scan):
+                self.assertEqual(_windows_leveldb_paths(root), [newer, older])
+            self.assertNotIn(cache, visited)
+
+    def test_profile_discovery_handles_missing_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(_windows_leveldb_paths(Path(directory) / "missing"), [])
+
     def test_snappy_literal_decompression(self):
         self.assertEqual(_decompress_snappy(b"\x03\x08abc"), b"abc")
 

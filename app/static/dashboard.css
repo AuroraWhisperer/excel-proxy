@@ -1,0 +1,95 @@
+    :root { --bg: #0a0d10; --panel: #14181d; --line: #303840; --text: #e7ecf1; --muted: #a2afbc; --accent: #ff7a3a; --success: #63dcb2; --danger: #ff9999; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    button, select, input { font: inherit; }
+    button, select, input[type="search"] { min-height: 40px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); padding: 8px 12px; }
+    button { cursor: pointer; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:disabled, select:disabled { opacity: .55; cursor: default; }
+    button.primary { background: var(--accent); color: #17100b; border-color: var(--accent); font-weight: 600; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 24px; font-weight: 650; }
+    h2 { font-size: 18px; font-weight: 600; }
+    .muted { color: var(--muted); }
+    code, pre, .number { font-family: Consolas, "SF Mono", monospace; font-variant-numeric: tabular-nums; }
+    code { overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+    header { border-bottom: 1px solid var(--line); }
+    .header-inner, main { width: min(1200px, 100% - 64px); margin: 0 auto; }
+    .header-inner { min-height: 92px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+    main { padding: 32px 0 48px; }
+    .connection { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; padding-bottom: 28px; border-bottom: 1px solid var(--line); }
+    .session-title { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+    .status { color: var(--muted); font-size: 13px; }
+    .status.ok { color: var(--success); }
+    .status.error, .error { color: var(--danger); }
+    .session-copy { max-width: 540px; margin-bottom: 16px; }
+    .test-row { display: flex; gap: 12px; align-items: end; }
+    .field { flex: 1; min-width: 0; }
+    .field label { display: block; margin-bottom: 8px; color: var(--muted); }
+    select { width: 100%; }
+    .hint { margin-top: 8px; color: var(--muted); font-size: 13px; }
+    .feedback { margin-top: 12px; min-height: 22px; overflow-wrap: anywhere; }
+    .settings { border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+    summary { padding: 18px 0; font-weight: 600; cursor: pointer; }
+    .setting-row { padding: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid var(--line); }
+    .setting-row p { margin-top: 4px; color: var(--muted); }
+    .setting-row input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px; }
+    .setting-row label { cursor: pointer; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .usage { display: flex; flex-wrap: wrap; gap: 12px 32px; margin: 0 0 24px; }
+    .usage div { display: flex; gap: 12px; align-items: baseline; }
+    .usage dt { color: var(--muted); }
+    .usage dd { margin: 0; font-weight: 600; }
+    .table-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; white-space: nowrap; text-align: left; }
+    th, td { padding: 14px 12px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: 12px; font-weight: 500; }
+    th:first-child, td:first-child { padding-left: 0; }
+    th:last-child, td:last-child { text-align: right; padding-right: 0; }
+    tbody tr:hover { background: var(--panel); }
+    td button { min-height: 32px; padding: 3px 10px; }
+    .empty { padding: 48px 16px; text-align: center; color: var(--muted); white-space: normal; }
+    .pager { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; }
+    .prompt { margin-top: 24px; padding: 24px; background: var(--panel); border-radius: 12px; }
+    .prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 560px; overflow: auto; font-size: 13px; margin-bottom: 0; }
+    footer { margin-top: 32px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) {
+      .header-inner, main { width: calc(100% - 32px); }
+      .header-inner { min-height: 80px; }
+      .header-inner .muted { display: none; }
+      main { padding-top: 24px; }
+      .connection { grid-template-columns: 1fr; gap: 24px; }
+      .setting-row { align-items: start; gap: 16px; }
+      .setting-row .actions { justify-content: end; }
+      .section-heading { align-items: start; flex-direction: column; }
+      input[type="search"] { width: 100%; }
+      .usage { gap: 8px 24px; }
+      .prompt { padding: 16px; }
+    }
+    @media (prefers-reduced-motion: no-preference) { button { transition: border-color .15s; } }
+    .page-nav { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 28px; }
+    .page-nav a { color: var(--muted); text-decoration: none; padding: 0 0 12px; border-bottom: 2px solid transparent; }
+    .page-nav a:hover { color: var(--text); }
+    .page-nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+    .cost-estimate { padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+    .cost-estimate .session-title { margin-bottom: 0; }
+    .cost-breakdown { display: grid; grid-template-columns: 1.4fr repeat(4, 1fr); gap: 16px; margin: 24px 0 0; padding: 20px 0; border-block: 1px solid var(--line); }
+    .cost-breakdown dt { color: var(--muted); font-size: 13px; }
+    .cost-breakdown dd { margin: 8px 0 0; font-size: 18px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .cost-sum dd { font-weight: 650; color: var(--accent); }
+    .cost-table { min-width: 720px; }
+    .cost-table td:not(:first-child), .cost-table th:not(:first-child) { text-align: right; }
+    .cost-table td:first-child { overflow-wrap: anywhere; min-width: 190px; }
+    .cost-rates { margin-top: 20px; }
+    .cost-rates summary { cursor: pointer; color: var(--muted); }
+    .cost-rates summary:hover { color: var(--text); }
+    .cost-rates .hint { max-width: 75ch; }
+    @media (max-width: 760px) {
+      .cost-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cost-sum { grid-column: 1 / -1; }
+      .cost-estimate .section-heading { gap: 4px; }
+    }

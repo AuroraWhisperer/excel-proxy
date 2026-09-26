@@ -23,6 +23,7 @@ from util import (
     utc_now_iso,
     _parse_iso_datetime,
     normalize_usage_payload,
+    _pricing_entry_for_model,
     _usage_event_model_name,
     _usage_event_source,
     deduplicate_usage_events,
@@ -584,6 +585,67 @@ def _ingest_usage_event(bucket: dict, event: dict, prepared: dict | None = None)
     bucket["request_count"] += 1
     model_bucket = bucket["_models"].setdefault(model_name, {"inputTokens": 0})
     model_bucket["inputTokens"] += input_tokens
+
+
+def _build_api_cost_estimate(events: list[dict], start: datetime, end: datetime) -> dict:
+    """Reprice recorded usage; stored costs and subscription quota are not bills."""
+    def empty_bucket():
+        return {
+            "request_count": 0, "priced_requests": 0,
+            "unpriced_requests": 0, "missing_usage_requests": 0,
+            "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+            "cost_breakdown": dict.fromkeys(
+                ("input_fresh", "cached_input", "cache_creation", "output"), 0.0
+            ),
+        }
+
+    total = empty_bucket()
+    models = {}
+    for event in events:
+        event_time = _parse_iso_datetime(event.get("finished_at") or event.get("started_at"))
+        if event_time is None or not start <= event_time < end:
+            continue
+        model = _usage_event_model_name(event) or "unknown"
+        rates = _pricing_entry_for_model(model)
+        if model not in models:
+            models[model] = {**empty_bucket(), "model": model,
+                             "rates": dict(rates) if rates else None}
+        row = models[model]
+        raw_usage = event.get("usage")
+        has_usage = isinstance(raw_usage, dict) and (
+            raw_usage.get("input_tokens") is not None or raw_usage.get("prompt_tokens") is not None
+        ) and (
+            raw_usage.get("output_tokens") is not None or raw_usage.get("completion_tokens") is not None
+        )
+        usage = normalize_usage_payload(raw_usage) if has_usage else None
+        breakdown = _usage_event_cost_breakdown(model, usage)
+        multiplier = _usage_event_cost_multiplier(event)
+        for bucket in (total, row):
+            bucket["request_count"] += 1
+            bucket["unpriced_requests"] += int(rates is None)
+            bucket["missing_usage_requests"] += int(not has_usage)
+            if usage is not None:
+                cached = _coerce_int(usage.get("cached_input_tokens"))
+                bucket["input_tokens"] += _usage_display_input_tokens(usage) + cached
+                bucket["cached_input_tokens"] += cached
+                bucket["output_tokens"] += _coerce_int(usage.get("output_tokens"))
+            if rates is not None and has_usage:
+                bucket["priced_requests"] += 1
+                for key, value in breakdown.items():
+                    bucket["cost_breakdown"][key] += value * multiplier
+
+    for bucket in (total, *models.values()):
+        bucket["complete"] = not (bucket["unpriced_requests"] or bucket["missing_usage_requests"])
+        bucket["cost_usd"] = (
+            sum(bucket["cost_breakdown"].values())
+            if bucket["priced_requests"] or not bucket["request_count"] else None
+        )
+    total["models"] = sorted(
+        models.values(), key=lambda row: (-(row["cost_usd"] or 0), row["model"])
+    )
+    total["currency"] = "USD"
+    total["pricing_basis"] = "reference_api_rates"
+    return total
 
 
 def _dashboard_event_key(event: dict) -> tuple:
@@ -1262,6 +1324,7 @@ class DashboardService:
                 "proxy_requests": current_month_usage.get("request_count", 0),
                 "sessions": local_usage.get("session_count", 0),
                 "usage": current_month_usage,
+                "api_cost_estimate": _build_api_cost_estimate(usage_events, month_start, month_end),
                 "daily_history": filled_daily_history,
             },
             "all_time": {

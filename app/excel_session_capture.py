@@ -229,8 +229,19 @@ def _leveldb_table_entries(path: Path):
 
 
 def _windows_leveldb_paths(webview_root: Path) -> list[Path]:
+    databases = []
+    for parent, directories, _files in os.walk(webview_root):
+        for name in list(directories):
+            if name.casefold() != "ebwebview":
+                continue
+            # The storage location is fixed within each profile; walking its
+            # browser cache only delays every request's forced session refresh.
+            directories.remove(name)
+            database = Path(parent) / name / "Default" / "Local Storage" / "leveldb"
+            if database.is_dir():
+                databases.append(database)
     return sorted(
-        webview_root.glob("**/EBWebView/Default/Local Storage/leveldb"),
+        databases,
         key=lambda path: path.stat().st_mtime if path.exists() else 0,
         reverse=True,
     )

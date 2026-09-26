@@ -863,15 +863,16 @@ async def parse_json_request(request: Request, error_callback=None) -> dict:
         elif raw_body.startswith(b"\x28\xb5\x2f\xfd"):
             raw_body = zstd_decompress(raw_body)
 
-        return json.loads(raw_body)
+        payload = json.loads(raw_body)
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+        return payload
     except HTTPException:
         raise
     except Exception:
         path = getattr(getattr(request, "url", None), "path", "?")
         content_type = str(request.headers.get("content-type", "")).strip()
         content_encoding = str(request.headers.get("content-encoding", "")).strip().lower()
-        preview_hex = raw_body[:24].hex()
-        preview_text = raw_body[:160].decode("utf-8", errors="replace")
         if error_callback is not None:
             error_callback(
                 {
@@ -880,13 +881,11 @@ async def parse_json_request(request: Request, error_callback=None) -> dict:
                     "content_type": content_type,
                     "content_encoding": content_encoding,
                     "body_len": len(raw_body),
-                    "preview_hex": preview_hex,
-                    "preview_text": preview_text,
                 }
             )
         print(
             f"WARN: Invalid JSON body path={path} content_type={content_type!r} "
-            f"content_encoding={content_encoding!r} body_len={len(raw_body)} preview_hex={preview_hex}",
+            f"content_encoding={content_encoding!r} body_len={len(raw_body)}",
             flush=True,
         )
         raise HTTPException(status_code=400, detail="Invalid JSON body")

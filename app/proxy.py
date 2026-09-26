@@ -41,10 +41,14 @@ if __name__ == "__main__":
 
 
 import asyncio
+import account_quota
 import atexit
 import background_proxy
 import codex_agent_compat
 import dashboard as dashboard_module
+from contextlib import aclosing
+import excel_stream
+import excel_image_generation
 import excel_images
 import excel_session_capture
 import excel_upstream
@@ -70,9 +74,10 @@ import httpx
 import uvicorn
 from anyio import CancelScope
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 from event_bus import EventBus
+from local_access import LocalAccessMiddleware
 from proxy_client_config import (
     ProxyClientConfig,
     ProxyClientConfigService,
@@ -107,6 +112,7 @@ from rate_limiting import throttled_client_send
 # ─── App & Global State ──────────────────────────────────────────────────────
 
 app = FastAPI()
+app.add_middleware(LocalAccessMiddleware)
 _REQUEST_TRACE_LOCK = Lock()
 _REQUEST_PROMPT_LOCK = Lock()
 _REQUEST_PROMPT_ACTIVE_IDS: set[str] = set()
@@ -1339,6 +1345,8 @@ class _ManagedResponsesStreamBody:
         return self
 
     async def __anext__(self):
+        if self._finalized:
+            raise StopAsyncIteration
         # Keep task cancellation from reaching httpcore before we can emit
         # RST_STREAM. httpcore otherwise closes and discards its private stream
         # state while leaving the server-side generation alive.
@@ -1363,6 +1371,17 @@ class _ManagedResponsesStreamBody:
                     pass
             await self._finalize("downstream_cancelled")
             raise
+        except upstream_errors.ExcelResponseError as exc:
+            # Headers are already sent. End with a Responses error event, not
+            # a broken HTTP body that the client mistakes for a network retry.
+            await self._finalize("response_validation_error", error=exc)
+            return format_translation.sse_encode("response.failed", {
+                "type": "response.failed",
+                "response": {
+                    "status": "failed", "output": [],
+                    "error": {"code": exc.code, "message": str(exc), "type": "server_error"},
+                },
+            })
         except Exception as exc:
             await self._finalize("upstream_error", error=exc)
             raise
@@ -1494,7 +1513,7 @@ class _ManagedResponsesStreamBody:
                 and not self.presentation_loop_completed
             ):
                 trace_status = 499
-            elif cause == "upstream_error" and self._stream_transform_enabled:
+            elif cause in {"upstream_error", "response_validation_error"} and self._stream_transform_enabled:
                 if isinstance(error, httpx.RequestError):
                     trace_status, _message = (
                         format_translation.upstream_request_error_status_and_message(error)
@@ -1570,6 +1589,8 @@ class _ManagedResponsesStreamBody:
                 "transport_cancel_confirmed": transport_cancel_confirmed,
                 "teardown_confirmed": teardown_confirmed,
                 "upstream_error_type": type(error).__name__ if error is not None else None,
+                "upstream_error_code": error.code if isinstance(error, upstream_errors.ExcelResponseError) else None,
+                "upstream_error_message": str(error) if isinstance(error, upstream_errors.ExcelResponseError) else None,
                 "presentation_transform": self._stream_transform_enabled,
             }
             trace_details = {}
@@ -3378,38 +3399,38 @@ async def dashboard_root():
 # Cache the dashboard HTML and its compressed representation so requests do
 # not repeat disk reads or compression.
 _DASHBOARD_HTML_LOCK = threading.Lock()
-_DASHBOARD_HTML_RAW: bytes | None = None
-_DASHBOARD_HTML_GZIPPED: bytes | None = None
-_DASHBOARD_HTML_MTIME: float = 0.0
-_DASHBOARD_HTML_ETAG: str = ""
+_DASHBOARD_HTML_CACHE: dict[str, tuple[int, int, bytes, bytes, str]] = {}
 
 
-def _load_dashboard_html_bytes() -> tuple[bytes, bytes, str]:
-    global _DASHBOARD_HTML_RAW, _DASHBOARD_HTML_GZIPPED, _DASHBOARD_HTML_MTIME, _DASHBOARD_HTML_ETAG
+def _load_dashboard_html_bytes(page: str = "dashboard.html") -> tuple[bytes, bytes, str]:
+    path = os.path.join(os.path.dirname(DASHBOARD_FILE), page)
     with _DASHBOARD_HTML_LOCK:
-        try:
-            stat = os.stat(DASHBOARD_FILE)
-            mtime = stat.st_mtime
-            size = stat.st_size
-        except OSError:
-            mtime = 0.0
-            size = 0
-        if _DASHBOARD_HTML_RAW is None or mtime != _DASHBOARD_HTML_MTIME:
-            with open(DASHBOARD_FILE, "rb") as f:
+        stat = os.stat(path)
+        cached = _DASHBOARD_HTML_CACHE.get(page)
+        if cached is None or cached[:2] != (stat.st_mtime_ns, stat.st_size):
+            with open(path, "rb") as f:
                 raw = f.read()
-            _DASHBOARD_HTML_RAW = raw
-            _DASHBOARD_HTML_GZIPPED = gzip.compress(raw, compresslevel=9)
-            _DASHBOARD_HTML_MTIME = mtime
-            # Strong-ish ETag from size + mtime + content hash; cheap to
-            # compute once at load time and stable for the file's lifetime.
+            gzipped = gzip.compress(raw, compresslevel=9)
             digest = hashlib.sha256(raw).hexdigest()[:16]
-            _DASHBOARD_HTML_ETAG = f'"dash-{size}-{int(mtime)}-{digest}"'
-        return _DASHBOARD_HTML_RAW, _DASHBOARD_HTML_GZIPPED, _DASHBOARD_HTML_ETAG
+            etag = f'"dash-{digest}"'
+            cached = (stat.st_mtime_ns, stat.st_size, raw, gzipped, etag)
+            _DASHBOARD_HTML_CACHE[page] = cached
+        return cached[2:]
 
 
+@app.get("/ui/dashboard.css")
+async def dashboard_styles():
+    return FileResponse(
+        os.path.join(os.path.dirname(DASHBOARD_FILE), "dashboard.css"),
+        media_type="text/css", headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/ui/requests", response_class=HTMLResponse)
 @app.get("/ui", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    raw, gzipped, etag = _load_dashboard_html_bytes()
+    page = "requests.html" if request.url.path == "/ui/requests" else "dashboard.html"
+    raw, gzipped, etag = _load_dashboard_html_bytes(page)
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
     accept_encoding = request.headers.get("accept-encoding", "")
@@ -3449,6 +3470,31 @@ def _build_dashboard_response_body(refresh: bool, gzip_body: bool = False) -> tu
 def _build_dashboard_sse_event(event_name: str) -> bytes:
     payload = dashboard_service.build_payload(False)
     return format_translation.sse_encode(event_name, payload)
+
+
+def _require_local_quota_request(request: Request):
+    origin = request.headers.get("origin")
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if request.url.hostname not in local_hosts or (
+        request.client and request.client.host not in local_hosts
+    ) or (origin and origin != f"{request.url.scheme}://{request.url.netloc}"):
+        raise HTTPException(status_code=403, detail="Open quota checking from the local dashboard.")
+
+
+@app.get("/api/account-quota")
+async def account_quota_status_api(request: Request):
+    _require_local_quota_request(request)
+    return JSONResponse(account_quota.quota_service.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/account-quota")
+async def account_quota_refresh_api(request: Request):
+    _require_local_quota_request(request)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=415, detail="Use application/json for quota checks.")
+    await parse_json_request(request)
+    payload = await asyncio.to_thread(account_quota.quota_service.refresh)
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/dashboard")
@@ -3809,7 +3855,6 @@ async def background_proxy_config_api(request: Request):
 
 def _excel_tool_call_event_bytes(
     tool_call: dict,
-    response_payload: dict,
     *,
     output_index: int,
 ) -> list[bytes]:
@@ -3860,39 +3905,51 @@ def _excel_tool_call_event_bytes(
                 "item": {**tool_call, "status": "completed"},
             },
         ),
-        format_translation.sse_encode(
-            "response.completed",
-            {
-                "type": "response.completed",
-                "response": response_payload,
-            },
-        ),
     ]
 
 
 def _excel_completed_response(response: object, finished_items: dict[int, dict]) -> dict:
     if not isinstance(response, dict) or response.get("status") not in (None, "completed"):
-        raise httpx.RemoteProtocolError("Excel response.completed has no valid response payload")
+        raise upstream_errors.ExcelResponseError(
+            "excel_invalid_response", "Excel response.completed has no valid response payload",
+        )
     result = dict(response)
+    terminal_output = response.get("output")
+    if terminal_output is None:
+        terminal_output = []
+    if not isinstance(terminal_output, list):
+        raise upstream_errors.ExcelResponseError("excel_invalid_response", "Excel response has an invalid output list")
+    for item in list(finished_items.values()) + terminal_output:
+        if not isinstance(item, dict) or (item.get("id") is not None and not isinstance(item["id"], str)):
+            raise upstream_errors.ExcelResponseError(
+                "excel_invalid_output_item", "Excel response has an invalid output item",
+            )
     output = dict(finished_items)
     item_indices = {item["id"]: index for index, item in finished_items.items() if item.get("id")}
-    for index, item in enumerate(response.get("output") or []):
-        if not isinstance(item, dict):
-            raise httpx.RemoteProtocolError("Excel response has an invalid output item")
+    for index, item in enumerate(terminal_output):
         index = item_indices.get(item.get("id"), index)
         previous = output.get(index, {})
         if previous.get("id") and item.get("id") and previous["id"] != item["id"]:
-            raise httpx.RemoteProtocolError("Excel response has conflicting output item identities")
+            raise upstream_errors.ExcelResponseError(
+                "excel_conflicting_output_items", "Excel response has conflicting output item identities",
+            )
         output[index] = {**previous, **item}
     if sorted(output) != list(range(len(output))):
-        raise httpx.RemoteProtocolError("Excel response is missing completed output items")
+        raise upstream_errors.ExcelResponseError(
+            "excel_missing_output_items", "Excel response is missing completed output items",
+        )
     result["output"] = [output[index] for index in sorted(output)]
     if not format_translation.extract_response_output_text(result) and not any(
         item.get("type") in {"function_call", "custom_tool_call", "compaction"}
         for item in result["output"]
     ):
-        raise httpx.RemoteProtocolError("Excel completed without assistant text, a tool call, or compaction")
+        raise upstream_errors.ExcelResponseError(
+            "excel_empty_response", "Excel completed without assistant text, a tool call, or compaction",
+        )
     return result
+
+
+EXCEL_STREAM_HEARTBEAT_SECONDS = 15.0
 
 
 def _excel_tool_stream_transform(source_body: dict):
@@ -3929,37 +3986,56 @@ def _excel_tool_stream_transform(source_body: dict):
                 )
             ]
 
-        async for event_name, data in format_translation.iter_sse_messages(byte_iter):
-            if data == "[DONE]":
-                break
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            event_type = str(event_name or payload.get("type") or "").strip().lower()
-            event_output_index = payload.get("output_index")
-            encoded = format_translation.sse_encode(event_type or "message", payload)
-
-            if event_type == "response.output_text.delta":
-                delta = payload.get("delta")
-                if isinstance(delta, str):
-                    full_text += delta
-                delta_template = {
-                    key: payload[key]
-                    for key in ("item_id", "output_index", "content_index")
-                    if key in payload
-                }
-                if marker_mode:
+        async with aclosing(excel_stream.iter_events(
+            byte_iter, heartbeat_seconds=EXCEL_STREAM_HEARTBEAT_SECONDS,
+        )) as events:
+            async for event_name, data in events:
+                if not data:
+                    yield b": keep-alive" + bytes([10, 10])
                     continue
-                search_start = max(0, emitted_upto - len(marker_open) + 1)
-                marker_pos = full_text.find(marker_open, search_start)
-                if marker_pos != -1:
-                    marker_mode = True
-                    pending = full_text[emitted_upto:marker_pos]
-                    emitted_upto = marker_pos
-                    if pending:
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                event_type = str(event_name or payload.get("type") or "").strip().lower()
+                event_output_index = payload.get("output_index")
+                encoded = format_translation.sse_encode(event_type or "message", payload)
+
+                if event_type == "response.output_text.delta":
+                    delta = payload.get("delta")
+                    if isinstance(delta, str):
+                        full_text += delta
+                    delta_template = {
+                        key: payload[key]
+                        for key in ("item_id", "output_index", "content_index")
+                        if key in payload
+                    }
+                    if marker_mode:
+                        continue
+                    search_start = max(0, emitted_upto - len(marker_open) + 1)
+                    marker_pos = full_text.find(marker_open, search_start)
+                    if marker_pos != -1:
+                        marker_mode = True
+                        pending = full_text[emitted_upto:marker_pos]
+                        emitted_upto = marker_pos
+                        if pending:
+                            yield format_translation.sse_encode(
+                                "response.output_text.delta",
+                                {
+                                    **delta_template,
+                                    "type": "response.output_text.delta",
+                                    "delta": pending,
+                                },
+                            )
+                        continue
+                    boundary = len(full_text) - _marker_hold_length(full_text)
+                    if boundary > emitted_upto:
+                        pending = full_text[emitted_upto:boundary]
+                        emitted_upto = boundary
                         yield format_translation.sse_encode(
                             "response.output_text.delta",
                             {
@@ -3969,160 +4045,167 @@ def _excel_tool_stream_transform(source_body: dict):
                             },
                         )
                     continue
-                boundary = len(full_text) - _marker_hold_length(full_text)
-                if boundary > emitted_upto:
-                    pending = full_text[emitted_upto:boundary]
-                    emitted_upto = boundary
-                    yield format_translation.sse_encode(
-                        "response.output_text.delta",
-                        {
-                            **delta_template,
-                            "type": "response.output_text.delta",
-                            "delta": pending,
-                        },
-                    )
-                continue
 
-            if event_type == "response.output_text.done":
-                if marker_mode:
-                    held_events.append(encoded)
+                if event_type == "response.output_text.done":
+                    if marker_mode:
+                        held_events.append(encoded)
+                        continue
+                    for chunk in flush_text():
+                        yield chunk
+                    yield encoded
                     continue
-                for chunk in flush_text():
-                    yield chunk
-                yield encoded
-                continue
 
-            # Native tool-call events must never reach Codex raw: their
-            # arguments follow the upstream's server-tool schema, and Codex
-            # executing the un-normalized call fails and provokes retry
-            # loops. Convert the completed item after a real terminal event.
-            if event_type in {
-                "response.function_call_arguments.delta",
-                "response.function_call_arguments.done",
-                "response.custom_tool_call_input.delta",
-                "response.custom_tool_call_input.done",
-            }:
-                native_call_seen = True
-                continue
-
-            if event_type in {"response.output_item.added", "response.output_item.done"}:
-                item = payload.get("item")
-                item_type = (
-                    item.get("type") if isinstance(item, dict) else None
-                )
-                if event_type == "response.output_item.done" and isinstance(item, dict):
-                    if isinstance(event_output_index, int) and event_output_index >= 0:
-                        finished_items[event_output_index] = dict(item)
-                if item_type in {"function_call", "custom_tool_call"}:
+                # Native tool-call events must never reach Codex raw: their
+                # arguments follow the upstream's server-tool schema, and Codex
+                # executing the un-normalized call fails and provokes retry
+                # loops. Convert the completed item after a real terminal event.
+                if event_type in {
+                    "response.function_call_arguments.delta",
+                    "response.function_call_arguments.done",
+                    "response.custom_tool_call_input.delta",
+                    "response.custom_tool_call_input.done",
+                }:
                     native_call_seen = True
                     continue
-                if (
-                    event_type == "response.output_item.done"
-                    and marker_mode
-                    and item_type == "message"
-                ):
-                    held_events.append(encoded)
-                    continue
-                if item_type == "reasoning":
-                    format_translation.normalize_reasoning_item_for_client(item)
-                    yield format_translation.sse_encode(event_type, payload)
-                    continue
-                yield encoded
-                continue
 
-            if event_type in {"response.completed", "response.failed", "response.incomplete"}:
-                response = payload.get("response")
-                response = response if isinstance(response, dict) else None
-                if event_type != "response.completed":
-                    # A partial native call is never executable client work.
-                    if response and isinstance(response.get("output"), list):
-                        response["output"] = [item for item in response["output"]
-                                              if not isinstance(item, dict)
-                                              or item.get("type") not in {"function_call", "custom_tool_call"}]
-                    safe_response = {key: response[key] for key in ("id", "status", "output", "usage")
-                                     if response and key in response}
-                    safe_response["error"] = upstream_errors.excel_error_payload(502, response)["error"]
-                    yield format_translation.sse_encode(event_type, {"type": event_type, "response": safe_response})
-                    return
-                response = _excel_completed_response(response, finished_items)
-                payload["response"] = response
-                format_translation.normalize_response_reasoning_for_client(response)
-                completed_text = full_text or format_translation.extract_response_output_text(response)
-                tool_call = excel_upstream.extract_client_tool_call(completed_text or "", allowed_tools)
-                if tool_call is None:
-                    tool_call = excel_upstream.extract_native_client_tool_call(response, source_body)
-                if tool_call is not None:
-                    held_events.clear()
-                    emitted_upto = len(full_text)
-                    response_payload = excel_upstream.response_payload_with_tool_call(
-                        response,
-                        tool_call,
-                        model_id=excel_upstream.excel_model_id(source_body.get("model"))
-                        or excel_upstream.MODEL_ID,
+                if event_type in {"response.output_item.added", "response.output_item.done"}:
+                    item = payload.get("item")
+                    item_type = (
+                        item.get("type") if isinstance(item, dict) else None
                     )
-                    tool_output_index = next((index for index, item in enumerate(response_payload["output"])
-                                              if item.get("type") in {"function_call", "custom_tool_call"}), 0)
-                    for chunk in _excel_tool_call_event_bytes(
-                        tool_call,
-                        response_payload,
-                        output_index=tool_output_index,
+                    if event_type == "response.output_item.done" and isinstance(item, dict):
+                        if isinstance(event_output_index, int) and event_output_index >= 0:
+                            finished_items[event_output_index] = dict(item)
+                    if item_type in {"function_call", "custom_tool_call"}:
+                        native_call_seen = True
+                        continue
+                    if (
+                        event_type == "response.output_item.done"
+                        and marker_mode
+                        and item_type == "message"
                     ):
+                        held_events.append(encoded)
+                        continue
+                    if item_type == "reasoning":
+                        format_translation.normalize_reasoning_item_for_client(item)
+                        yield format_translation.sse_encode(event_type, payload)
+                        continue
+                    yield encoded
+                    continue
+
+                if event_type in {"response.completed", "response.failed", "response.incomplete"}:
+                    response = payload.get("response")
+                    response = response if isinstance(response, dict) else None
+                    if event_type != "response.completed":
+                        # A partial native call is never executable client work.
+                        if response and isinstance(response.get("output"), list):
+                            response["output"] = [item for item in response["output"]
+                                                  if not isinstance(item, dict)
+                                                  or item.get("type") not in {"function_call", "custom_tool_call"}]
+                        safe_response = {key: response[key] for key in ("id", "status", "output", "usage")
+                                         if response and key in response}
+                        safe_response["error"] = upstream_errors.excel_error_payload(502, response)["error"]
+                        yield format_translation.sse_encode(event_type, {"type": event_type, "response": safe_response})
+                        return
+                    response = _excel_completed_response(response, finished_items)
+                    payload["response"] = response
+                    format_translation.normalize_response_reasoning_for_client(response)
+                    completed_text = full_text or format_translation.extract_response_output_text(response)
+                    tool_call = excel_upstream.extract_client_tool_call(completed_text or "", allowed_tools)
+                    tool_diagnostics: dict = {}
+                    tool_calls = excel_upstream.extract_native_client_tool_calls(
+                        response, source_body, diagnostics=tool_diagnostics,
+                    )
+                    has_native_calls = any(
+                        item.get("type") in {"function_call", "custom_tool_call"}
+                        for item in response.get("output", []) if isinstance(item, dict)
+                    )
+                    if not has_native_calls and tool_call is not None:
+                        tool_calls = [tool_call]
+                    if tool_calls is not None:
+                        held_events.clear()
+                        emitted_upto = len(full_text)
+                        response_payload = excel_upstream.response_payload_with_tool_calls(
+                            response, tool_calls,
+                            model_id=excel_upstream.excel_model_id(source_body.get("model"))
+                            or excel_upstream.MODEL_ID,
+                        )
+                        for index, item in enumerate(response_payload["output"]):
+                            if item.get("type") not in {"function_call", "custom_tool_call"}:
+                                continue
+                            for chunk in _excel_tool_call_event_bytes(item, output_index=index):
+                                yield chunk
+                        yield format_translation.sse_encode(
+                            "response.completed", {"type": "response.completed", "response": response_payload},
+                        )
+                        return
+                    if native_call_seen or any(isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}
+                           for item in response.get("output", [])):
+                        raise upstream_errors.ExcelResponseError(
+                            "excel_untranslatable_tool_call",
+                            excel_upstream.tool_call_failure_message(tool_diagnostics),
+                        )
+                    # Not a tool call after all: release everything that was held
+                    # back so the client still receives the full assistant text.
+                    for chunk in flush_text():
                         yield chunk
+                    for held in held_events:
+                        yield held
+                    held_events.clear()
+                    marker_mode = False
+                    yield format_translation.sse_encode(event_type, payload)
                     return
-                if native_call_seen or any(isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}
-                       for item in response.get("output", [])):
-                    raise httpx.RemoteProtocolError("Excel returned a tool call that cannot be translated to a client tool")
-                # Not a tool call after all: release everything that was held
-                # back so the client still receives the full assistant text.
-                for chunk in flush_text():
-                    yield chunk
-                for held in held_events:
-                    yield held
-                held_events.clear()
-                marker_mode = False
-                yield format_translation.sse_encode(event_type, payload)
-                return
 
-            if event_type == "error":
-                yield format_translation.sse_encode("error", {"type": "error", **upstream_errors.excel_error_payload(502, payload)})
-                return
+                if event_type == "error":
+                    yield format_translation.sse_encode("error", {"type": "error", **upstream_errors.excel_error_payload(502, payload)})
+                    return
 
-            yield encoded
+                yield encoded
 
         # EOF (even [DONE]) is not proof of a completed model response. Leave
         # calls unexposed so the client can retry without repeating tool work.
-        raise httpx.RemoteProtocolError("Excel stream ended before a terminal Responses event")
+        raise upstream_errors.ExcelResponseError(
+            "excel_stream_incomplete", "Excel stream ended before a terminal Responses event",
+        )
 
     return transform
 
 
 async def _read_excel_non_streaming_response_payload(
     upstream: httpx.Response,
+    usage_event: dict | None = None,
 ) -> dict | None:
     finished_items: dict[int, dict] = {}
-    async for event_name, data in format_translation.iter_sse_messages(upstream.aiter_bytes()):
-        if data == "[DONE]":
-            break
-        try:
-            parsed = json.loads(data or "")
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        event_type = str(event_name or parsed.get("type") or "").strip().lower()
-        if event_type == "response.output_item.done":
-            index, item = parsed.get("output_index"), parsed.get("item")
-            if isinstance(index, int) and index >= 0 and isinstance(item, dict):
-                finished_items[index] = item
-        elif event_type == "response.completed":
-            # Do not wait for EOF: BPS can send a malformed HTTP tail after
-            # the valid terminal SSE event, or leave the connection open.
-            return _excel_completed_response(parsed.get("response"), finished_items)
-        elif event_type in {"response.failed", "response.incomplete"}:
-            return parsed.get("response")
-        elif event_type == "error":
-            return {"status": "failed", "error": parsed.get("error", parsed)}
-    raise httpx.RemoteProtocolError("Excel stream ended before a terminal Responses event")
+    capture = usage_tracker.create_sse_capture("responses")
+    async with aclosing(excel_stream.iter_events(upstream.aiter_bytes())) as events:
+        async for event_name, data in events:
+            if data == "[DONE]":
+                break
+            try:
+                parsed = json.loads(data or "")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            event_type = str(event_name or parsed.get("type") or "").strip().lower()
+            parsed["type"] = event_type
+            if capture.consume_responses_payload(parsed):
+                usage_tracker.mark_first_output(usage_event)
+            if event_type == "response.output_item.done":
+                index, item = parsed.get("output_index"), parsed.get("item")
+                if isinstance(index, int) and index >= 0 and isinstance(item, dict):
+                    finished_items[index] = item
+            elif event_type == "response.completed":
+                # Do not wait for EOF: BPS can send a malformed HTTP tail after
+                # the valid terminal SSE event, or leave the connection open.
+                return _excel_completed_response(parsed.get("response"), finished_items)
+            elif event_type in {"response.failed", "response.incomplete"}:
+                return parsed.get("response")
+            elif event_type == "error":
+                return {"status": "failed", "error": parsed.get("error", parsed)}
+    raise upstream_errors.ExcelResponseError(
+        "excel_stream_incomplete", "Excel stream ended before a terminal Responses event",
+    )
 
 
 async def _post_excel_non_streaming_request(
@@ -4149,15 +4232,25 @@ async def _post_excel_non_streaming_request(
                 upstream, trace_plan=plan,
             )
         if "text/event-stream" in upstream.headers.get("content-type", "").lower():
-            response_payload = await _read_excel_non_streaming_response_payload(upstream)
+            response_payload = await _read_excel_non_streaming_response_payload(upstream, plan.usage_event)
         else:
             await upstream.aread()
             response_payload = _extract_upstream_json_payload(upstream)
             if isinstance(response_payload, dict) and response_payload.get("status") not in {"failed", "incomplete"}:
                 response_payload = _excel_completed_response(response_payload, {})
+                # JSON has no observable token stream; record output on arrival.
+                capture = usage_tracker.create_sse_capture("responses")
+                if capture.consume_responses_payload({"response": response_payload}):
+                    usage_tracker.mark_first_output(plan.usage_event)
     except asyncio.CancelledError:
         _finish_usage_and_trace(plan, 499, upstream=upstream)
         raise
+    except upstream_errors.ExcelResponseError as exc:
+        payload = {"error": {
+            "type": "server_error", "code": exc.code, "message": str(exc), "param": None,
+        }}
+        _finish_usage_and_trace(plan, 502, upstream=upstream, response_payload=payload)
+        return JSONResponse(status_code=502, content=payload)
     except httpx.RequestError as exc:
         status_code, message = format_translation.upstream_request_error_status_and_message(exc)
         _finish_usage_and_trace(plan, status_code, upstream=upstream, response_text=message)
@@ -4184,24 +4277,31 @@ async def _post_excel_non_streaming_request(
         response_text,
         excel_upstream.client_tool_types(client_body),
     )
-    if tool_call is None:
-        tool_call = excel_upstream.extract_native_client_tool_call(
-            response_payload,
-            client_body,
+    tool_diagnostics: dict = {}
+    tool_calls = excel_upstream.extract_native_client_tool_calls(
+        response_payload, client_body, diagnostics=tool_diagnostics,
+    )
+    has_native_calls = any(
+        isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}
+        for item in response_payload.get("output", [])
+    )
+    if not has_native_calls and tool_call is not None:
+        tool_calls = [tool_call]
+    if tool_calls is not None:
+        translated_payload = excel_upstream.response_payload_with_tool_calls(
+            response_payload, tool_calls, model_id=excel_model_id,
         )
-    if tool_call is not None:
-        translated_payload = excel_upstream.response_payload_with_tool_call(
-            response_payload,
-            tool_call,
-            model_id=excel_model_id,
-        )
-        if isinstance(translated_payload, dict):
-            format_translation.normalize_response_reasoning_for_client(translated_payload)
+        format_translation.normalize_response_reasoning_for_client(translated_payload)
     elif any(isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}
              for item in response_payload.get("output", [])):
-        message = "Excel returned a tool call that cannot be translated to a client tool"
-        _finish_usage_and_trace(plan, 502, response_text=message)
-        return format_translation.openai_error_response(502, message)
+        message = excel_upstream.tool_call_failure_message(tool_diagnostics)
+        error_payload = {"error": {
+            "type": "server_error", "code": "excel_untranslatable_tool_call",
+            "message": message, "param": None,
+        }}
+        _finish_usage_and_trace(plan, 502, upstream=upstream,
+                                response_payload=error_payload, response_text=message)
+        return JSONResponse(status_code=502, content=error_payload)
 
     _finish_usage_and_trace(
         plan,
@@ -4234,11 +4334,13 @@ async def _handle_excel_responses(
     excel_model_id = (
         excel_upstream.excel_model_id(body.get("model")) or excel_upstream.MODEL_ID
     )
-    excel_session_capture.refresh_macos_excel_session(
+    await asyncio.to_thread(
+        excel_session_capture.refresh_macos_excel_session,
         excel_upstream.excel_session_store,
         force=True,
     )
-    excel_session_capture.refresh_windows_excel_session(
+    await asyncio.to_thread(
+        excel_session_capture.refresh_windows_excel_session,
         excel_upstream.excel_session_store,
         force=True,
     )
@@ -4329,6 +4431,58 @@ def _excel_request_body(body: dict) -> dict:
     if model is None:
         raise HTTPException(status_code=400, detail="Unsupported model. Select a model from /v1/models.")
     return {**body, "model": model}
+
+
+async def _handle_excel_image_request(request: Request, *, edit: bool) -> Response:
+    if "application/json" not in request.headers.get("content-type", "").lower():
+        return format_translation.openai_error_response(
+            415, "Use a JSON image request; edits take images as inline image_url data URLs.",
+        )
+    try:
+        body = await request.json()
+        send = excel_image_generation.prepare_request(body, edit=edit)
+    except (ValueError, UnicodeDecodeError) as exc:
+        return format_translation.openai_error_response(400, str(exc))
+    for refresh in (excel_session_capture.refresh_macos_excel_session,
+                    excel_session_capture.refresh_windows_excel_session):
+        refresh(excel_upstream.excel_session_store, force=True)
+    try:
+        session_headers = excel_upstream.excel_session_store.request_headers(stream=False)
+    except RuntimeError:
+        return format_translation.openai_error_response(401, "Refresh the signed-in ChatGPT Excel add-in session.")
+    headers = {key: value for key, value in session_headers.items()
+               if key.lower() not in {"content-type", "content-length", "accept"}}
+    headers["accept"] = "application/json"
+    url = excel_image_generation.EDITS_URL if edit else excel_image_generation.GENERATIONS_URL
+    client = _get_excel_upstream_client()
+    try:
+        upstream_request = client.build_request(
+            "POST", url, headers=headers, timeout=httpx.Timeout(600.0, connect=30.0), **send,
+        )
+        upstream = await throttled_client_send(client, upstream_request, follow_redirects=False)
+    except httpx.RequestError as exc:
+        status, message = format_translation.upstream_request_error_status_and_message(exc)
+        return format_translation.openai_error_response(status, message)
+    if upstream.status_code >= 300:
+        status = upstream.status_code if upstream.status_code >= 400 else 502
+        return JSONResponse(status_code=status, content=upstream_errors.excel_error_payload(status))
+    try:
+        payload = excel_image_generation.validate_response(upstream.json())
+    except (ValueError, UnicodeDecodeError):
+        return format_translation.openai_error_response(502, "Excel returned an invalid image response.")
+    return JSONResponse(content=payload)
+
+
+@app.post("/images/generations")
+@app.post("/v1/images/generations")
+async def images_generate(request: Request):
+    return await _handle_excel_image_request(request, edit=False)
+
+
+@app.post("/images/edits")
+@app.post("/v1/images/edits")
+async def images_edit(request: Request):
+    return await _handle_excel_image_request(request, edit=True)
 
 
 @app.post("/responses")
@@ -4427,7 +4581,7 @@ if __name__ == "__main__":
     _write_proxy_pid_file()
     atexit.register(_remove_proxy_pid_file)
     try:
-        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8000, access_log=False, timeout_graceful_shutdown=2))
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8000, proxy_headers=False, access_log=False, timeout_graceful_shutdown=2))
         shutdown_context = nullcontext()
         if sys.platform == "win32":
             from windows_launcher import shutdown_listener

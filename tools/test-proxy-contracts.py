@@ -9,9 +9,17 @@ from unittest.mock import patch
 
 
 TEST_MODULES = (
+    "test_local_access",
+    "test_request_validation",
     "test_excel_only",
+    "test_dashboard_pages",
+    "test_api_cost_estimate",
+    "test_account_quota",
     "test_excel_upstream",
+    "test_excel_tool_compatibility",
     "test_excel_continuity",
+    "test_excel_stream_recovery",
+    "test_excel_image_generation",
     "test_excel_images",
     "test_excel_request_compat",
     "test_excel_contracts",
@@ -19,6 +27,9 @@ TEST_MODULES = (
     "test_request_prompt_archive",
     "test_proxy_client_config",
     "test_usage_model_identity",
+    "test_usage_timing",
+    "test_first_output_probe",
+    "test_usage_startup",
     "test_excel_session_capture",
     "test_proxy_env",
     "test_windows_launcher",

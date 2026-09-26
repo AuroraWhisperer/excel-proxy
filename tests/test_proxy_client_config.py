@@ -29,6 +29,23 @@ class ExcelConfigLifecycleTests(unittest.TestCase):
             client_proxy_settings_file=str(self.settings),
         ))
 
+    def test_image_header_is_added_without_losing_custom_headers(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                original = '[model_providers.custom]' + chr(10)
+                if nested:
+                    original += '[model_providers.custom.http_headers]' + chr(10) + '"X-Local" = "keep"'
+                else:
+                    original += 'http_headers = { "X-Local" = "keep" }'
+                merged = self.service._merged_codex_primary_config(original)
+                provider = tomllib.loads(merged)["model_providers"]["custom"]
+                self.assertEqual(provider["http_headers"]["X-Local"], "keep")
+                self.assertEqual(provider["http_headers"]["x-openai-actor-authorization"], "excel-proxy")
+                self.assertEqual(tomllib.loads(self.service._merged_codex_primary_config(merged)), tomllib.loads(merged))
+        managed = tomllib.loads(self.service._render_codex_proxy_config())
+        self.assertEqual(managed["model_providers"]["custom"]["http_headers"],
+                         {"x-openai-actor-authorization": "excel-proxy"})
+
     def test_enable_refresh_disable_preserves_original_configuration(self):
         original = 'model = "old-model"\nmodel_provider = "openai"\n[features]\nexample = true\n'
         self.primary.write_text(original, encoding="utf-8")
@@ -45,6 +62,29 @@ class ExcelConfigLifecycleTests(unittest.TestCase):
         self.service.disable_codex_proxy_config()
         self.assertEqual(self.primary.read_text(encoding="utf-8"), original)
         self.assertFalse(self.catalog.exists())
+
+    def test_refresh_updates_stale_compaction_limits_without_changing_config(self):
+        self.primary.write_text('model = "old-model"\n', encoding="utf-8")
+        self.service.write_codex_proxy_config()
+        primary = self.primary.read_text(encoding="utf-8")
+        managed = self.managed.read_text(encoding="utf-8")
+        catalog = json.loads(self.catalog.read_text(encoding="utf-8"))
+        for model in catalog["models"]:
+            model["auto_compact_token_limit"] = 180_000
+        self.catalog.write_text(json.dumps(catalog), encoding="utf-8")
+
+        self.assertTrue(self.service.refresh_codex_model_catalog())
+
+        refreshed = json.loads(self.catalog.read_text(encoding="utf-8"))
+        for model in refreshed["models"]:
+            expected = {
+                "gpt-6-astra-excel": 232_200,
+                "gpt-5.6-luna-excel": 180_000,
+            }.get(model["slug"], 240_000)
+            with self.subTest(model=model["slug"]):
+                self.assertEqual(model["auto_compact_token_limit"], expected)
+        self.assertEqual(self.primary.read_text(encoding="utf-8"), primary)
+        self.assertEqual(self.managed.read_text(encoding="utf-8"), managed)
 
     def test_existing_proxy_upgrade_replaces_old_model_and_keeps_backup(self):
         self.primary.write_text('model = "old-model"\n', encoding="utf-8")
@@ -116,10 +156,31 @@ class ExcelCodexInstructionsTests(unittest.TestCase):
             with self.subTest(model=model_id):
                 self.assertEqual(models[model_id]["input_modalities"], ["text", "image"])
 
-    def test_excel_catalog_uses_full_codex_prompt_only_for_excel_models(self):
-        self.assertTrue(self.prompt.startswith("You are Codex, an agent based on GPT-6."))
-        self.assertGreater(len(self.prompt), 20_000)
-        self.assertIn("\n# Autonomy and persistence\n", self.prompt)
+    def test_excel_catalog_compaction_matches_model_window(self):
+        models = self._models()
+        for model_id in excel_upstream.MODEL_IDS:
+            with self.subTest(model=model_id):
+                expected_window = 200_000 if model_id == "gpt-5.6-luna-excel" else 272_000
+                expected_limit = {
+                    "gpt-6-astra-excel": 232_200,
+                    "gpt-5.6-luna-excel": 180_000,
+                }.get(model_id, 240_000)
+                self.assertEqual(models[model_id]["context_window"], expected_window)
+                self.assertEqual(models[model_id]["auto_compact_token_limit"], expected_limit)
+                self.assertEqual(models[model_id]["effective_context_window_percent"], 95)
+                self.assertEqual(
+                    excel_upstream.LOCAL_MODEL_CAPABILITIES[model_id]["auto_compact_token_limit"],
+                    expected_limit,
+                )
+
+    def test_excel_catalog_uses_compact_workspace_prompt(self):
+        self.assertTrue(self.prompt.startswith("You are Codex, an assistant"))
+        self.assertGreater(len(self.prompt), 0)
+        self.assertLess(len(self.prompt), 1500)
+        self.assertIn("AGENTS.md", self.prompt)
+        self.assertIn("tools and schemas supplied for this request", self.prompt)
+        for stale_interface in ("functions.exec", "request_user_input_async", "skills.list"):
+            self.assertNotIn(stale_interface, self.prompt)
         models = self._models()
         for model_id in excel_upstream.MODEL_IDS:
             with self.subTest(model=model_id):
@@ -129,14 +190,16 @@ class ExcelCodexInstructionsTests(unittest.TestCase):
 
     def test_catalog_prompt_survives_request_and_tool_result_replay(self):
         instructions = self._models()["gpt-5.6-sol-excel"]["base_instructions"]
+        environment = excel_upstream._message_item("developer", "Workspace: /repo. Respect the current permission rules.")
         source = {
             "model": "gpt-5.6-sol-excel",
             "instructions": instructions,
-            "input": [excel_upstream._message_item("user", "Read the project files.")],
+            "input": [environment, excel_upstream._message_item("user", "Read the project files.")],
             "tools": [{"type": "function", "name": "exec_command"}],
         }
         first = excel_upstream.prepare_responses_body(source)
         self.assertEqual(first["input"][0], excel_upstream._message_item("developer", self.prompt))
+        self.assertIn(environment, first["input"])
         self.assertIn('"name":"exec_command"', first["input"][1]["content"][0]["text"])
         source["input"].extend([
             {"type": "function_call", "call_id": "call_prompt_test", "name": "exec_command", "arguments": '{"cmd":"pwd"}'},
@@ -144,6 +207,7 @@ class ExcelCodexInstructionsTests(unittest.TestCase):
         ])
         replay = excel_upstream.prepare_responses_body(source)
         self.assertEqual(replay["input"][0], first["input"][0])
+        self.assertIn(environment, replay["input"])
         self.assertEqual(replay["input"][-2]["name"], "run_officejs")
         self.assertEqual(replay["input"][-1]["output"], "workspace")
         self.assertEqual(replay["metadata"]["agent_iteration"], "2")

@@ -35,6 +35,7 @@ EXCEL_MODEL_UPSTREAMS = {
 }
 MODEL_IDS = tuple(EXCEL_MODEL_UPSTREAMS)
 MODEL_ID = "gpt-5.6-sol-excel"
+ASTRA_COMPACTION_TOKEN_LIMIT = 258_000
 _UPSTREAM_MODEL_OVERRIDE = os.environ.get("GHCP_EXCEL_UPSTREAM_MODEL", "").strip()
 UPSTREAM_MODEL = _UPSTREAM_MODEL_OVERRIDE or EXCEL_MODEL_UPSTREAMS[MODEL_ID]
 EXCEL_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
@@ -156,7 +157,10 @@ _DEFAULT_CLIENT_HEADERS = {
 
 LOCAL_MODEL_CAPABILITIES = {
     model_id: {
-        "auto_compact_token_limit": 180_000,
+        "auto_compact_token_limit": {
+            "gpt-6-astra-excel": ASTRA_COMPACTION_TOKEN_LIMIT * 9 // 10,
+            "gpt-5.6-luna-excel": 180_000,
+        }.get(model_id, 240_000),
         "context_window": 200_000 if "luna" in model_id else 272_000,
         "display_name": {
             "gpt-6-astra-excel": "6-Astra Excel",
@@ -168,7 +172,7 @@ LOCAL_MODEL_CAPABILITIES = {
         "max_context_window": 200_000 if "luna" in model_id else 272_000,
         "messages_endpoint_supported": False,
         "model_picker_enabled": True,
-        "parallel_tool_calls": False,
+        "parallel_tool_calls": True,
         "provider": "OpenAI Excel",
         "reasoning_efforts": list(
             EXCEL_MODEL_REASONING_EFFORTS.get(model_id, EXCEL_REASONING_EFFORTS)
@@ -240,6 +244,17 @@ def _client_tool_key(name: str, namespace: str | None = None) -> str:
     return f"{namespace}.{name}" if namespace else name
 
 
+def _tool_call_name(item: dict) -> str | None:
+    name, namespace = item.get("name"), item.get("namespace")
+    if not isinstance(name, str):
+        return None
+    if namespace in (None, ""):
+        return name
+    if not isinstance(namespace, str):
+        return None
+    return name if name.startswith(namespace + ".") else _client_tool_key(name, namespace)
+
+
 def _iter_client_tools(tools: object, namespace: str | None = None):
     """Yield callable leaves from Codex dynamic tool namespaces."""
     if not isinstance(tools, list):
@@ -260,7 +275,7 @@ def _iter_client_tools(tools: object, namespace: str | None = None):
                     tool,
                 )
         if tool_type == "namespace" and isinstance(name, str) and name.strip():
-            yield from _iter_client_tools(tool.get("tools"), name.strip())
+            yield from _iter_client_tools(tool.get("tools"), _client_tool_key(name.strip(), namespace))
 
 
 def client_tool_types(source: dict) -> dict[str, str]:
@@ -288,10 +303,13 @@ def _original_client_tool_name(
     if name.startswith(CLIENT_TOOL_RELAY_PREFIX):
         candidate = name[len(CLIENT_TOOL_RELAY_PREFIX) :]
         return candidate if candidate in allowed_tools else None
-    # Accept the old, unprefixed marker format for in-flight responses. Native
-    # Basispoints calls also arrive unprefixed; schema validation below decides
-    # whether one can safely stand in for a same-named client tool.
-    return name if name in allowed_tools else None
+    # Prefer an exact catalog entry over the native host's display prefix.
+    if name in allowed_tools:
+        return name
+    if name.startswith("functions."):
+        candidate = name[len("functions.") :]
+        return candidate if candidate in allowed_tools else None
+    return None
 
 
 def _remember_native_call(item: dict) -> None:
@@ -352,42 +370,99 @@ def _client_tool_specs(source: dict) -> dict[str, dict]:
     return result
 
 
-def _decode_transport_code(code: object) -> dict | None:
+def _decode_transport_invocation(code: str, allowed_tools: dict[str, str]) -> dict | None:
+    # This is a data parser, not a JavaScript interpreter. The entire body must
+    # be one catalog call with one JSON literal and no executable expressions.
+    invocation = re.fullmatch(
+        r"(?:return\s+)?(?:await\s+)?(?P<name>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)"
+        r"\s*\((?P<argument>.*)\)\s*;?",
+        code, re.DOTALL | re.ASCII,
+    )
+    if invocation is None:
+        return None
+    name = _original_client_tool_name(invocation.group("name"), allowed_tools)
+    if name is None:
+        return None
+    try:
+        argument = json.loads(invocation.group("argument"), strict=False)
+    except json.JSONDecodeError:
+        return None
+    if allowed_tools[name] == "function" and isinstance(argument, dict):
+        return {"name": name, "arguments": argument}
+    if allowed_tools[name] == "custom" and isinstance(argument, str):
+        return {"name": name, "input": argument}
+    return None
+
+
+def _transport_decode_failure(
+    diagnostics: dict | None, field: str, value: object,
+    error: json.JSONDecodeError | None = None,
+) -> None:
+    if diagnostics is not None:
+        diagnostics["transport_field"] = field
+        diagnostics["transport_value_type"] = {
+            str: "string", dict: "object", list: "array", type(None): "null",
+            bool: "boolean", int: "number", float: "number",
+        }.get(type(value), "unknown")
+        if error is not None:
+            # JSON exception text and source data may contain private content.
+            diagnostics["json_line"] = error.lineno
+            diagnostics["json_column"] = error.colno
+            diagnostics["json_error"] = {
+                "Invalid control character at": "unescaped_control_character",
+                "Invalid \\escape": "invalid_escape",
+                "Invalid \\uXXXX escape": "invalid_unicode_escape",
+                "Unterminated string starting at": "unterminated_string",
+                "Expecting ',' delimiter": "missing_comma",
+                "Expecting ':' delimiter": "missing_colon",
+                "Expecting property name enclosed in double quotes": "invalid_property_name",
+                "Expecting value": "missing_value",
+                "Extra data": "extra_data",
+            }.get(error.msg, "invalid_json")
+    return None
+
+
+def _decode_transport_code(
+    code: object, allowed_tools: dict[str, str], diagnostics: dict | None = None,
+) -> dict | None:
     if isinstance(code, dict):
         return code
     if not isinstance(code, str):
-        return None
+        return _transport_decode_failure(diagnostics, "arguments.code", code)
 
-    candidates = [code]
-    repaired = _repair_invalid_json_backslashes(code)
-    if repaired != code:
-        candidates.append(repaired)
-
-    # Models occasionally wrap the requested JSON in a code fence or a
-    # one-line assignment despite the exact-format instruction. Decode the
-    # first complete JSON object without ever evaluating the surrounding
-    # text as JavaScript. The repair pass only doubles backslashes that are
-    # invalid JSON escapes inside string values (for example ``\\(`` in a
-    # shell regex), preserving the command rather than executing anything.
-    decoder = json.JSONDecoder()
-    for candidate_text in candidates:
+    # Unwrap only known decorations and bounded extra JSON encoding. Searching
+    # for an inner object can select an argument or silently discard a second
+    # call; decode the entire payload instead, without evaluating JavaScript.
+    for _ in range(3):
+        code = code.strip()
+        if code.startswith("```"):
+            fence = re.fullmatch(r"```(?:json|javascript|js)?[ \t]*\r?\n(.*?)\r?\n```", code, re.DOTALL)
+            if fence is None:
+                return _transport_decode_failure(diagnostics, "arguments.code", code)
+            code = fence.group(1).strip()
+        invocation = _decode_transport_invocation(code, allowed_tools)
+        if invocation is not None:
+            return invocation
+        statement = re.match(r"(?:(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*|return\s+)", code)
+        if statement is not None:
+            code = code[statement.end():].strip()
+            if code.endswith(";"):
+                code = code[:-1].rstrip()
         try:
-            envelope = json.loads(candidate_text)
+            # Raw line breaks/tabs in tool literals are data, not missing JSON
+            # structure. Preserve them without guessing quotes or delimiters.
+            envelope = json.loads(code, strict=False)
         except json.JSONDecodeError:
-            envelope = None
-            for index, character in enumerate(candidate_text):
-                if character != "{":
-                    continue
-                try:
-                    candidate, _ = decoder.raw_decode(candidate_text[index:])
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(candidate, dict):
-                    envelope = candidate
-                    break
+            try:
+                envelope = json.loads(_repair_invalid_json_backslashes(code), strict=False)
+            except json.JSONDecodeError as exc:
+                return _transport_decode_failure(diagnostics, "arguments.code", code, exc)
         if isinstance(envelope, dict):
             return envelope
-    return None
+        if not isinstance(envelope, str):
+            return _transport_decode_failure(diagnostics, "arguments.code", envelope)
+        code = envelope
+    return _transport_decode_failure(diagnostics, "arguments.code", code)
 
 
 def _repair_invalid_json_backslashes(text: str) -> str:
@@ -436,36 +511,37 @@ def _is_transport_name(name: object) -> bool:
     return isinstance(name, str) and name in CLIENT_TOOL_TRANSPORT_ALIASES
 
 
-def _transport_envelope(native: dict) -> dict | None:
+def _transport_envelope(
+    native: dict, allowed_tools: dict[str, str], diagnostics: dict | None = None,
+) -> dict | None:
     if (
         native.get("type") != "function_call"
-        or not _is_transport_name(native.get("name"))
+        or not _is_transport_name(_tool_call_name(native))
     ):
         return None
-    raw_arguments = native.get("arguments")
-    if not isinstance(raw_arguments, str):
-        return None
-    try:
-        arguments = json.loads(raw_arguments)
-    except json.JSONDecodeError:
-        return None
+    arguments = native.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            return _transport_decode_failure(diagnostics, "arguments", arguments, exc)
     if not isinstance(arguments, dict):
-        return None
-    envelope = _decode_transport_code(arguments.get("code"))
+        return _transport_decode_failure(diagnostics, "arguments", arguments)
+    envelope = _decode_transport_code(arguments.get("code"), allowed_tools, diagnostics)
     for _ in range(2):
-        if envelope is None or not _is_transport_name(envelope.get("name")):
+        if envelope is None or not _is_transport_name(_tool_call_name(envelope)):
             break
         nested_arguments = envelope.get("arguments")
         if isinstance(nested_arguments, str):
             try:
                 nested_arguments = json.loads(nested_arguments)
-            except json.JSONDecodeError:
-                return None
+            except json.JSONDecodeError as exc:
+                return _transport_decode_failure(diagnostics, "nested.arguments", nested_arguments, exc)
         if not isinstance(nested_arguments, dict):
-            return None
-        envelope = _decode_transport_code(nested_arguments.get("code"))
-    if envelope is not None and _is_transport_name(envelope.get("name")):
-        return None
+            return _transport_decode_failure(diagnostics, "nested.arguments", nested_arguments)
+        envelope = _decode_transport_code(nested_arguments.get("code"), allowed_tools, diagnostics)
+    if envelope is not None and _is_transport_name(_tool_call_name(envelope)):
+        return _transport_decode_failure(diagnostics, "nested.transport_limit", envelope)
     return envelope
 
 
@@ -619,16 +695,76 @@ def _restore_native_function_arguments(name: str, arguments: object) -> object:
     return json.dumps(native, separators=(",", ":"), ensure_ascii=False)
 
 
+def _reject_native_tool_call(diagnostics: dict | None, reason: str) -> None:
+    if diagnostics is not None:
+        diagnostics["reason"] = reason
+    return None
+
+
+def tool_call_failure_message(diagnostics: dict) -> str:
+    message = "Excel returned a tool call that cannot be translated to a client tool"
+    reason = diagnostics.get("reason", "missing_completed_tool_call")
+    index = diagnostics.get("tool_call_index")
+    detail = f"call {index + 1}: {reason}" if isinstance(index, int) else reason
+    for key, label in (("transport_field", "field"), ("transport_value_type", "type"),
+                       ("json_line", "line"), ("json_column", "column"), ("json_error", "json")):
+        if key in diagnostics:
+            detail += f"; {label}={diagnostics[key]}"
+    return f"{message} ({detail})"
+
+
+def extract_native_client_tool_calls(
+    response: dict | None,
+    source: dict,
+    *,
+    diagnostics: dict | None = None,
+) -> list[dict[str, str]] | None:
+    """Validate the whole tool batch before exposing any executable work."""
+    if diagnostics is not None:
+        diagnostics.clear()
+    if not isinstance(response, dict) or not isinstance(response.get("output"), list):
+        return _reject_native_tool_call(diagnostics, "missing_completed_tool_call")
+    native_calls = [
+        item for item in response["output"]
+        if isinstance(item, dict)
+        and item.get("type") in {"function_call", "custom_tool_call"}
+    ]
+    if not native_calls:
+        return _reject_native_tool_call(diagnostics, "missing_completed_tool_call")
+    if source.get("parallel_tool_calls") is False and len(native_calls) > 1:
+        return _reject_native_tool_call(diagnostics, "parallel_tools_disabled")
+    converted = []
+    for index, native in enumerate(native_calls):
+        if native.get("status") not in (None, "completed"):
+            if diagnostics is not None:
+                diagnostics["tool_call_index"] = index
+            return _reject_native_tool_call(diagnostics, "incomplete_tool_call")
+        call = extract_native_client_tool_call({"output": [native]}, source, diagnostics=diagnostics, remember=False)
+        if call is None:
+            if diagnostics is not None:
+                diagnostics["tool_call_index"] = index
+            return None
+        converted.append(call)
+    if any(len({call[key] for call in converted}) != len(converted) for key in ("call_id", "id")):
+        return _reject_native_tool_call(diagnostics, "duplicate_tool_identity")
+    for native in native_calls:
+        _remember_native_call(native)
+    return converted
+
+
 def extract_native_client_tool_call(
     response: dict | None,
     source: dict,
+    *,
+    diagnostics: dict | None = None,
+    remember: bool = True,
 ) -> dict[str, str] | None:
     if not isinstance(response, dict):
-        return None
+        return _reject_native_tool_call(diagnostics, "missing_completed_tool_call")
     specs = _client_tool_specs(source)
     output = response.get("output")
     if not isinstance(output, list):
-        return None
+        return _reject_native_tool_call(diagnostics, "missing_completed_tool_call")
     native_calls = [
         item
         for item in output
@@ -636,19 +772,19 @@ def extract_native_client_tool_call(
         and item.get("type") in {"function_call", "custom_tool_call"}
     ]
     if len(native_calls) != 1:
-        return None
+        return _reject_native_tool_call(diagnostics, "invalid_tool_call_count")
     native = native_calls[0]
     allowed_tools = client_tool_types(source)
-    envelope = _transport_envelope(native)
-    if _is_transport_name(native.get("name")) and envelope is None:
-        return None
+    envelope = _transport_envelope(native, allowed_tools, diagnostics)
+    if _is_transport_name(_tool_call_name(native)) and envelope is None:
+        return _reject_native_tool_call(diagnostics, "invalid_transport_envelope")
     name = (
-        _original_client_tool_name(envelope.get("name"), allowed_tools)
+        _original_client_tool_name(_tool_call_name(envelope), allowed_tools)
         if envelope is not None
-        else _original_client_tool_name(native.get("name"), allowed_tools)
+        else _original_client_tool_name(_tool_call_name(native), allowed_tools)
     )
     if name is None or name not in specs:
-        return None
+        return _reject_native_tool_call(diagnostics, "unknown_tool")
     tool_info = specs[name]
     spec = tool_info["spec"]
     expected_type = tool_info["type"]
@@ -659,19 +795,19 @@ def extract_native_client_tool_call(
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
-                    return None
+                    return _reject_native_tool_call(diagnostics, "invalid_function_arguments")
         else:
             if native.get("type") != "function_call":
-                return None
+                return _reject_native_tool_call(diagnostics, "tool_type_mismatch")
             raw_arguments = native.get("arguments")
             if not isinstance(raw_arguments, str):
-                return None
+                return _reject_native_tool_call(diagnostics, "invalid_function_arguments")
             try:
                 arguments = json.loads(raw_arguments)
             except json.JSONDecodeError:
-                return None
+                return _reject_native_tool_call(diagnostics, "invalid_function_arguments")
         if not isinstance(arguments, dict):
-            return None
+            return _reject_native_tool_call(diagnostics, "invalid_function_arguments")
         if envelope is None:
             arguments = _normalize_native_function_arguments(name, arguments)
         input_schema = (
@@ -680,7 +816,7 @@ def extract_native_client_tool_call(
             or spec.get("input_schema")
         )
         if not _value_matches_schema(arguments, input_schema):
-            return None
+            return _reject_native_tool_call(diagnostics, "arguments_schema_mismatch")
         native_call_id = native.get("call_id")
         call_id = (
             native_call_id
@@ -688,7 +824,8 @@ def extract_native_client_tool_call(
             else f"{NATIVE_FALLBACK_CALL_ID_PREFIX}{uuid4().hex}"
         )
         native_item_id = native.get("id")
-        _remember_native_call(native)
+        if remember:
+            _remember_native_call(native)
         result = {
             "type": "function_call",
             "id": (
@@ -713,10 +850,21 @@ def extract_native_client_tool_call(
             if envelope is not None
             else native.get("input")
         )
+        # Some native function relays wrap the freeform patch as a single
+        # argument. Unwrap only this exact shape, without rewriting the patch.
+        if envelope is not None and "input" not in envelope and name == "apply_patch":
+            arguments = envelope.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    return _reject_native_tool_call(diagnostics, "invalid_custom_input")
+            if isinstance(arguments, dict) and set(arguments) == {"patch"}:
+                custom_input = arguments["patch"]
         if envelope is None and native.get("type") != "custom_tool_call":
-            return None
+            return _reject_native_tool_call(diagnostics, "tool_type_mismatch")
         if not isinstance(custom_input, str):
-            return None
+            return _reject_native_tool_call(diagnostics, "invalid_custom_input")
         native_call_id = native.get("call_id")
         call_id = (
             native_call_id
@@ -724,8 +872,9 @@ def extract_native_client_tool_call(
             else f"{NATIVE_FALLBACK_CALL_ID_PREFIX}{uuid4().hex}"
         )
         native_item_id = native.get("id")
-        _remember_native_call(native)
-        return {
+        if remember:
+            _remember_native_call(native)
+        result = {
             "type": "custom_tool_call",
             "id": (
                 native_item_id
@@ -737,10 +886,13 @@ def extract_native_client_tool_call(
                 else f"ctc_{call_id}"
             ),
             "call_id": call_id,
-            "name": name,
+            "name": tool_info["name"],
             "input": custom_input,
         }
-    return None
+        if tool_info["namespace"]:
+            result["namespace"] = tool_info["namespace"]
+        return result
+    return _reject_native_tool_call(diagnostics, "tool_type_mismatch")
 
 
 def _client_tool_protocol_instructions(source: dict) -> str:
@@ -875,6 +1027,11 @@ def _client_tool_protocol_reminder(source: dict) -> str:
             " Native update_plan is allowed for progress; after its result, "
             "take the next substantive action through run_officejs."
         )
+    if source.get("parallel_tool_calls") is False:
+        reminder += (
+            " The client requires serial execution: emit at most one tool call per response "
+            "and wait for its result before calling another tool. Do not use multi_tool_use.parallel."
+        )
     return reminder
 
 
@@ -936,9 +1093,9 @@ def extract_client_tool_call(
     return None
 
 
-def response_payload_with_tool_call(
+def response_payload_with_tool_calls(
     response: dict | None,
-    tool_call: dict[str, str],
+    tool_calls: list[dict[str, str]],
     *,
     model_id: str = MODEL_ID,
 ) -> dict[str, object]:
@@ -948,25 +1105,28 @@ def response_payload_with_tool_call(
     result.setdefault("created_at", int(time.time()))
     result["status"] = "completed"
     result["model"] = model_id
-    completed_tool_call = {**tool_call, "status": "completed"}
+    completed_calls = [{**call, "status": "completed"} for call in tool_calls]
     existing_output = result.get("output")
-    replaced_native_call = False
-    output: list[dict] = []
-    if isinstance(existing_output, list):
-        for item in existing_output:
-            if (
-                not replaced_native_call
-                and isinstance(item, dict)
-                and item.get("type") in {"function_call", "custom_tool_call"}
-            ):
-                output.append(completed_tool_call)
-                replaced_native_call = True
-            elif isinstance(item, dict):
-                output.append(item)
-    result["output"] = output if replaced_native_call else [completed_tool_call]
+    output = [item for item in existing_output if isinstance(item, dict)] if isinstance(existing_output, list) else []
+    native_indices = [
+        index for index, item in enumerate(output)
+        if item.get("type") in {"function_call", "custom_tool_call"}
+    ]
+    for index, call in zip(native_indices, completed_calls):
+        output[index] = call
+    result["output"] = output if native_indices else completed_calls
     result["error"] = None
     result["incomplete_details"] = None
     return result
+
+
+def response_payload_with_tool_call(
+    response: dict | None,
+    tool_call: dict[str, str],
+    *,
+    model_id: str = MODEL_ID,
+) -> dict[str, object]:
+    return response_payload_with_tool_calls(response, [tool_call], model_id=model_id)
 
 
 def _decode_jwt_exp(authorization: str) -> float | None:
@@ -1304,14 +1464,14 @@ def _normalized_tool_output(
     call_id = item.get("call_id")
     origin = call_origins.get(call_id) if isinstance(call_id, str) else None
     normalized = item
-    if origin == "update_plan":
+    if origin in {"update_plan", "functions.update_plan"}:
         # The Basispoints update_plan executor returns this object. Codex's
         # client-side status tool instead returns the display string
         # "Plan updated"; replaying that string leaves the server-native tool
         # state unresolved and makes the model plan again.
         normalized = {**normalized, "output": '{"status":"ok"}'}
     if (
-        origin == CLIENT_TOOL_TRANSPORT_NAME
+        _is_transport_name(origin)
         and isinstance(call_id, str)
         and call_id
         and normalized.get("type") == "custom_tool_call_output"
@@ -1334,7 +1494,7 @@ def _normalized_tool_output(
             normalized = {**normalized, "id": result_id}
     output_text = _item_text(normalized.get("output"))
     if (
-        origin == CLIENT_TOOL_TRANSPORT_NAME
+        _is_transport_name(origin)
         and output_text.strip().lower().startswith("unsupported call: run_officejs")
     ):
         return {**normalized, "output": _TRANSPORT_RETRY_GUIDANCE}
@@ -1349,7 +1509,7 @@ def _normalized_tool_output(
 
 def _fallback_transport_call(item: dict) -> dict:
     """Rebuild a transport call if the proxy restarted between call and result."""
-    name = str(item.get("name") or "")
+    name = _tool_call_name(item) or ""
     if item.get("type") == "custom_tool_call":
         envelope: dict[str, object] = {
             "name": name,
@@ -1408,6 +1568,29 @@ def _strip_client_only_item_metadata(item: dict) -> dict:
     return sanitized
 
 
+def _native_call_matches_history(native: dict, item: dict) -> bool:
+    """A reused call ID must never replace the client's recorded tool input."""
+    name = _tool_call_name(item)
+    tool_type = {"function_call": "function", "custom_tool_call": "custom"}.get(item.get("type"))
+    if not name or not tool_type:
+        return False
+    converted = extract_native_client_tool_call(
+        {"output": [native]}, {"tools": [{"type": tool_type, "name": name}]}, remember=False,
+    )
+    if converted is None or converted["call_id"] != item.get("call_id"):
+        return False
+    if tool_type == "custom":
+        return converted["input"] == item.get("input")
+    try:
+        # Sorting keys ignores JSON formatting while preserving integer precision
+        # and distinguishing booleans from numbers (True == 1 in Python).
+        supplied = json.loads(item["arguments"])
+        expected = json.loads(converted["arguments"])
+        return json.dumps(supplied, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def translate_input_items(
     raw_input: object,
     allowed_tools: dict[str, str] | None = None,
@@ -1456,15 +1639,15 @@ def translate_input_items(
         item = _strip_client_only_item_metadata(item)
         item_type = str(item.get("type") or "").strip().lower()
         if item_type in {"function_call", "custom_tool_call"}:
-            name = item.get("name")
+            name = _tool_call_name(item)
             call_id = item.get("call_id")
             marker_relay = (
                 isinstance(call_id, str)
                 and call_id.startswith(CLIENT_MARKER_CALL_ID_PREFIX)
             )
             remembered = remembered_calls.get(call_id) if isinstance(call_id, str) else None
-            if remembered is not None:
-                native_name = remembered.get("name")
+            if remembered is not None and _native_call_matches_history(remembered, item):
+                native_name = _tool_call_name(remembered)
                 if isinstance(call_id, str) and isinstance(native_name, str):
                     call_origins[call_id] = native_name
                 result.append(remembered)
@@ -1594,13 +1777,15 @@ def _agent_turn_state(raw_input: object) -> tuple[str, str]:
         ensure_ascii=False,
     )
     fingerprint = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-    iteration_outputs = sum(
-        1
-        for item in raw_input[last_user_index + 1 :]
-        if isinstance(item, dict)
-        and item.get("type")
-        in {"function_call_output", "custom_tool_call_output"}
-    )
+    iteration_outputs = 0
+    in_result_batch = False
+    for item in raw_input[last_user_index + 1 :]:
+        if not isinstance(item, dict):
+            continue
+        is_result = item.get("type") in {"function_call_output", "custom_tool_call_output"}
+        if is_result and not in_result_batch:
+            iteration_outputs += 1
+        in_result_batch = is_result
     return fingerprint, str(iteration_outputs + 1)
 
 
@@ -1708,10 +1893,15 @@ def prepare_responses_body(
         output["reasoning"] = {"effort": output["reasoning_effort"], "summary": "auto"}
 
     context_management = source.get("context_management")
+    # Start Astra's Codex compaction at 90%; reserve the full limit for the
+    # upstream fallback instead of compacting there at the old 200k default.
+    compact_threshold = (
+        ASTRA_COMPACTION_TOKEN_LIMIT if output["model"] == "gpt-6-astra" else 200_000
+    )
     output["context_management"] = (
         context_management
         if isinstance(context_management, list)
-        else [{"type": "compaction", "compact_threshold": 200_000}]
+        else [{"type": "compaction", "compact_threshold": compact_threshold}]
     )
 
     metadata: dict[str, str] = {}

@@ -16,6 +16,29 @@ import windows_launcher as launcher
 
 
 class DesktopLaunchTests(unittest.TestCase):
+    def setUp(self):
+        self.connect = self.enterContext(patch("socket.create_connection"))
+
+    def test_unready_tcp_port_skips_the_slow_http_probe(self):
+        for error in (ConnectionRefusedError(), TimeoutError()):
+            with self.subTest(error=error), \
+                 patch.object(launcher._OPENER, "open", side_effect=AssertionError("HTTP probe must not run")) as open_url:
+                self.connect.side_effect = error
+                self.assertFalse(launcher.proxy_running())
+                open_url.assert_not_called()
+        self.connect.assert_called_with(("127.0.0.1", 8000), timeout=0.2)
+
+    def test_ready_tcp_port_still_checks_proxy_identity(self):
+        response = io.BytesIO(json.dumps({"pid_file": launcher.PROXY_PID_FILE}).encode())
+        response.status = 200
+        with patch.object(launcher._OPENER, "open", return_value=response) as open_url:
+            self.assertTrue(launcher.proxy_running())
+        self.connect.assert_called_once_with(("127.0.0.1", 8000), timeout=0.2)
+        self.connect.return_value.__exit__.assert_called_once()
+        open_url.assert_called_once_with(
+            f"{launcher.PROXY_BASE_URL}/api/config/background-proxy", timeout=5,
+        )
+
     def test_start_reuses_existing_proxy(self):
         with patch.object(launcher, "_launch_lock", return_value=nullcontext()), \
              patch.object(launcher, "proxy_running", return_value=True), \

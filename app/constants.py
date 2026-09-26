@@ -50,16 +50,15 @@ approvals_reviewer = "user"
 name = "Excel"
 base_url = "http://127.0.0.1:8000/v1"
 wire_api = "responses"
+http_headers = { "x-openai-actor-authorization" = "excel-proxy" }
 """
 DETAILED_REQUEST_HISTORY_LIMIT = 5000
 # Cap on the number of detailed request rows serialized into the dashboard
 # bulk payload. The in-memory deque still holds DETAILED_REQUEST_HISTORY_LIMIT
 # events for aggregations (cost summary, daily history, sessions) and for
-# lazy /api/request-prompt lookups, but the dashboard table only paginates
-# 100 per page; shipping all 5000 events on every refresh sent megabytes of
-# JSON the UI never rendered. 500 covers ~5 pages of history without
-# capping common debugging workflows.
-DASHBOARD_RECENT_REQUEST_LIMIT = 500
+# lazy /api/request-prompt lookups; only the latest 100 rows are sent to
+# the dashboard, avoiding large payloads without discarding stored history.
+DASHBOARD_RECENT_REQUEST_LIMIT = 100
 # Rolling retention for the request-trace log. Appends past this count are
 # compacted down to the most recent N rows via a temp-file rewrite (same
 # pattern as the usage log). See proxy._enforce_trace_retention.
@@ -213,6 +212,22 @@ Please write the summary now, following the structure and guidelines above. Be c
 
 # ─── Model pricing & SKU tables ──────────────────────────────────────────────
 MODEL_PRICING = {
+    "gpt-6-astra-excel": {
+        "provider": "OpenAI Excel",
+        # API-equivalent reference; Excel subscription usage is not an API bill.
+        "reference_model": "gpt-6-astra",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "checked_on": "2026-09-25",
+        "input_per_million": 10.00,
+        "cached_input_per_million": 1.00,
+        "cache_write_per_million": 12.50,
+        "output_per_million": 50.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_per_million": 20.00,
+        "long_context_cached_input_per_million": 2.00,
+        "long_context_cache_write_per_million": 25.00,
+        "long_context_output_per_million": 75.00,
+    },
     "gpt-5.6-luna-excel": {
         "provider": "OpenAI Excel",
         "credit_unit_usd": 0.04,
@@ -241,15 +256,24 @@ MODEL_PRICING = {
     },
     "gpt-5.6-sol-excel": {
         "provider": "OpenAI Excel",
+        "reference_model": "gpt-5.6-sol",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "checked_on": "2026-09-25",
         "credit_unit_usd": 0.04,
         "input_per_million": 4.00,
         "cached_input_per_million": 0.40,
         "cache_write_per_million": 5.00,
         "output_per_million": 20.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_per_million": 8.00,
+        "long_context_cached_input_per_million": 0.80,
+        "long_context_cache_write_per_million": 10.00,
+        "long_context_output_per_million": 30.00,
     },
 }
 
 MODEL_PRICING_ALIASES = {
+    "gpt-6 astra excel": "gpt-6-astra-excel",
     "gpt-5.6 luna excel": "gpt-5.6-luna-excel",
     "gpt-5.6 sol excel": "gpt-5.6-sol-excel",
     "gpt-5.6 terra excel": "gpt-5.6-terra-excel",

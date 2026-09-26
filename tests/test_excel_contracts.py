@@ -113,6 +113,21 @@ class ExcelErrorTests(unittest.TestCase):
         self.assertNotIn("KNOWN_CREDENTIAL", json.dumps(trace))
         self.assertNotIn("PRIVATE_PROMPT", json.dumps(trace))
 
+    def test_output_identity_failures_have_distinct_safe_codes(self):
+        cases = (
+            ({"status": "completed", "output": []},
+             {1: {"type": "reasoning", "id": "rs_gap"}}, "excel_missing_output_items"),
+            ({"status": "completed", "output": [{"type": "reasoning", "id": "rs_new"}]},
+             {0: {"type": "reasoning", "id": "rs_old"}}, "excel_conflicting_output_items"),
+            ({"status": "completed", "output": []},
+             {0: {"type": "reasoning", "id": []}}, "excel_invalid_output_item"),
+        )
+        for response, finished_items, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(upstream_errors.ExcelResponseError) as caught:
+                    proxy._excel_completed_response(response, finished_items)
+                self.assertEqual(caught.exception.code, code)
+
 
 class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -172,6 +187,32 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 502)
         self.assertEqual(len(self.requests), 1)
 
+    async def test_first_output_is_marked_for_streaming_and_buffered_responses(self):
+        self.upstream_status = 200
+        self.upstream_body = {
+            "id": "resp_timing", "status": "completed", "output": [{
+                "id": "msg_timing", "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            }],
+        }
+        for response_mode in ("stream", "buffered_sse", "json"):
+            with self.subTest(response_mode=response_mode):
+                self.upstream_sse = None if response_mode == "json" else (
+                    format_translation.sse_encode("response.output_text.delta", {
+                        "type": "response.output_text.delta", "delta": "Hello",
+                    }) + format_translation.sse_encode("response.completed", {
+                        "type": "response.completed", "response": self.upstream_body,
+                    })
+                )
+                self.finish.reset_mock()
+                result = await self.local.post("/responses", json={
+                    "model": excel_upstream.MODEL_ID, "input": "test",
+                    "stream": response_mode == "stream",
+                })
+                self.assertEqual(result.status_code, 200)
+                event = self.finish.call_args.args[0].usage_event
+                self.assertGreaterEqual(event["_first_output_monotonic"], event["_started_monotonic"])
+
     async def test_terminal_errors_are_safe_on_both_response_modes(self):
         self.upstream_status = 200
         self.upstream_sse = format_translation.sse_encode("response.failed", {
@@ -184,6 +225,141 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("PRIVATE_PROMPT", result.text)
                 if stream:
                     self.assertEqual(result.text.count("event: response.failed"), 1)
+
+    async def test_invalid_completed_stream_emits_safe_error_without_replay(self):
+        cases = (
+            (None, "excel_invalid_response"),
+            ({"status": "completed", "output": 1}, "excel_invalid_response"),
+            ({"status": "completed", "output": {}}, "excel_invalid_response"),
+            ({"status": "completed", "output": [{"id": []}]}, "excel_invalid_output_item"),
+            ({"status": "completed", "output": ["PRIVATE_PROMPT KNOWN_CREDENTIAL"]}, "excel_invalid_output_item"),
+            ({"status": "completed", "output": []}, "excel_empty_response"),
+            ({"status": "completed", "output": [{"type": "reasoning", "summary": []}]}, "excel_empty_response"),
+            ({"status": "completed", "output": [{
+                "type": "function_call", "id": "fc_invalid", "call_id": "call_invalid",
+                "name": "unknown_excel_tool", "arguments": "PRIVATE_PROMPT KNOWN_CREDENTIAL",
+            }]}, "excel_untranslatable_tool_call"),
+        )
+        self.upstream_status = 200
+        for response, code in cases:
+            with self.subTest(code=code, response=response):
+                self.finish.reset_mock()
+                before = len(self.requests)
+                self.upstream_sse = format_translation.sse_encode("response.completed", {
+                    "type": "response.completed", "response": response,
+                })
+                result = await self.local.post("/responses", json={
+                    "model": excel_upstream.MODEL_ID, "input": "test", "stream": True,
+                })
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.text.count("event: response.failed"), 1)
+                event, data = format_translation.parse_sse_block(result.text.strip())
+                self.assertEqual(event, "response.failed")
+                payload = json.loads(data)
+                self.assertEqual(payload["type"], "response.failed")
+                self.assertEqual(payload["response"]["status"], "failed")
+                self.assertEqual(payload["response"]["output"], [])
+                payload = payload["response"]["error"]
+                self.assertEqual(payload["code"], code)
+                self.assertTrue(payload["message"])
+                for private in ("event: response.completed", "unknown_excel_tool", "PRIVATE_PROMPT", "KNOWN_CREDENTIAL"):
+                    self.assertNotIn(private, result.text)
+                self.assertEqual(len(self.requests), before + 1)
+                self.finish.assert_called_once()
+                self.assertEqual(self.finish.call_args.args[1], 502)
+                lifecycle = self.finish.call_args.args[0].trace_context["responses_stream_lifecycle"]
+                self.assertEqual(lifecycle["termination_cause"], "response_validation_error")
+                self.assertEqual(lifecycle["upstream_error_code"], code)
+                self.assertEqual(lifecycle["upstream_error_message"], payload["message"])
+
+    async def test_incomplete_stream_does_not_release_tools_or_retry(self):
+        self.upstream_status = 200
+        self.upstream_sse = format_translation.sse_encode("response.output_item.done", {
+            "type": "response.output_item.done", "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_partial", "call_id": "call_partial",
+                     "name": "unknown_excel_tool", "arguments": "PRIVATE_PROMPT KNOWN_CREDENTIAL"},
+        }) + b"data: [DONE]" + bytes([10, 10])
+        result = await self.local.post("/responses", json={
+            "model": excel_upstream.MODEL_ID, "input": "test", "stream": True,
+        })
+        self.assertEqual(result.status_code, 200)
+        event, data = format_translation.parse_sse_block(result.text.strip())
+        self.assertEqual(event, "response.failed")
+        self.assertEqual(json.loads(data)["response"]["error"]["code"], "excel_stream_incomplete")
+        for private in ("function_call", "PRIVATE_PROMPT", "KNOWN_CREDENTIAL"):
+            self.assertNotIn(private, result.text)
+        self.assertEqual(len(self.requests), 1)
+        self.finish.assert_called_once()
+        self.assertEqual(self.finish.call_args.args[1], 502)
+
+    async def test_non_streaming_validation_failure_preserves_safe_error_code(self):
+        self.upstream_status = 200
+        self.upstream_sse = format_translation.sse_encode("response.completed", {
+            "type": "response.completed", "response": {"status": "completed", "output": []},
+        })
+        result = await self.local.post("/responses", json={
+            "model": excel_upstream.MODEL_ID, "input": "test", "stream": False,
+        })
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.json()["error"]["code"], "excel_empty_response")
+        self.assertEqual(len(self.requests), 1)
+        self.finish.assert_called_once()
+
+    async def test_failed_stream_closes_upstream_after_partial_output(self):
+        class Stream(httpx.AsyncByteStream):
+            close_count = 0
+
+            async def __aiter__(self):
+                yield format_translation.sse_encode("response.output_text.delta", {
+                    "type": "response.output_text.delta", "delta": "Partial output", "output_index": 0,
+                })
+                yield format_translation.sse_encode("response.completed", {
+                    "type": "response.completed", "response": {"status": "completed", "output": []},
+                })
+                raise AssertionError("Do not consume the HTTP tail after a rejected terminal event")
+
+            async def aclose(self):
+                self.close_count += 1
+
+        stream = Stream()
+        response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+        with patch.object(self.remote, "send", new=AsyncMock(return_value=response)) as send:
+            result = await self.local.post("/responses", json={
+                "model": excel_upstream.MODEL_ID, "input": "test", "stream": True,
+            })
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("Partial output", result.text)
+        self.assertEqual(result.text.count("event: response.failed"), 1)
+        self.assertNotIn("event: response.completed", result.text)
+        self.assertTrue(response.is_closed)
+        self.assertEqual(stream.close_count, 1)
+        send.assert_awaited_once()
+        self.finish.assert_called_once()
+        self.assertEqual(self.finish.call_args.args[1], 502)
+
+    async def test_transport_failure_is_not_mislabeled_as_response_validation(self):
+        class Stream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield format_translation.sse_encode("response.output_text.delta", {
+                    "type": "response.output_text.delta", "delta": "Partial output", "output_index": 0,
+                })
+                raise httpx.RemoteProtocolError("PRIVATE_PROMPT KNOWN_CREDENTIAL")
+
+        response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Stream())
+        with patch.object(self.remote, "send", new=AsyncMock(return_value=response)) as send:
+            with self.assertRaises(httpx.RemoteProtocolError):
+                await self.local.post("/responses", json={
+                    "model": excel_upstream.MODEL_ID, "input": "test", "stream": True,
+                })
+        self.assertTrue(response.is_closed)
+        send.assert_awaited_once()
+        self.finish.assert_called_once()
+        lifecycle = self.finish.call_args.args[0].trace_context["responses_stream_lifecycle"]
+        self.assertEqual(lifecycle["termination_cause"], "upstream_error")
+        self.assertEqual(lifecycle["upstream_error_type"], "RemoteProtocolError")
+        self.assertIsNone(lifecycle["upstream_error_code"])
+        self.assertIsNone(lifecycle["upstream_error_message"])
+        self.assertNotIn("KNOWN_CREDENTIAL", json.dumps(lifecycle))
 
     async def test_connect_failure_retries_but_ambiguous_failure_does_not(self):
         for exception, expected_count in ((httpx.ConnectError, 2), (httpx.ReadError, 1), (httpx.WriteTimeout, 1)):

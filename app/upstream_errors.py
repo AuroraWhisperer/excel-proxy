@@ -5,6 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any, Sequence
 
+import httpx
+
+
+class ExcelResponseError(httpx.RemoteProtocolError):
+    """A locally detected response-contract failure with a client-safe reason."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
 
 def sanitized_error_details(payload: Any, *, secrets: Sequence[str] = ()) -> dict | None:
     """Keep bounded diagnostic fields, never an upstream request/body echo."""

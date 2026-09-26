@@ -93,27 +93,27 @@ def parse_sse_block(raw_block: str) -> tuple[str | None, str | None]:
 async def iter_sse_messages(byte_iter):
     buffer = ""
     decoder = codecs.getincrementaldecoder("utf-8")()
-    async for chunk in byte_iter:
-        if isinstance(chunk, bytes):
-            buffer += decoder.decode(chunk)
-        else:
-            buffer += str(chunk)
-
-        normalized = buffer.replace("\r\n", "\n")
-        while "\n\n" in normalized:
-            raw_block, normalized = normalized.split("\n\n", 1)
-            event_name, data = parse_sse_block(raw_block)
-            if data is not None:
-                yield event_name, data
-        buffer = normalized
+    transport_error = None
+    try:
+        async for chunk in byte_iter:
+            buffer += decoder.decode(chunk) if isinstance(chunk, bytes) else str(chunk)
+            normalized = buffer.replace("\r\n", "\n")
+            while "\n\n" in normalized:
+                raw_block, normalized = normalized.split("\n\n", 1)
+                event_name, data = parse_sse_block(raw_block)
+                if data is not None:
+                    yield event_name, data
+            buffer = normalized
+    except httpx.TransportError as exc:
+        transport_error = exc
 
     buffer += decoder.decode(b"", final=True)
-
-    trailing = buffer.strip()
-    if trailing:
-        event_name, data = parse_sse_block(trailing)
+    if buffer.strip():
+        event_name, data = parse_sse_block(buffer.strip())
         if data is not None:
             yield event_name, data
+    if transport_error is not None:
+        raise transport_error
 
 
 def extract_text_from_chat_delta(delta) -> str:
