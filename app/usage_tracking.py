@@ -1,13 +1,11 @@
-"""Usage event lifecycle, session/request tracking, persistence, archival, and SSE usage capture."""
+"""Usage event lifecycle, request identity, history loading and persistence."""
 
-import hashlib
 import inspect
 import json
 import os
 import tempfile
 import time
 from collections import OrderedDict, deque
-from contextlib import closing
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Callable
@@ -17,57 +15,52 @@ import httpx
 from fastapi import Request
 
 import codex_agent_compat
+import usage_records
 from constants import (
-    TOKEN_DIR, USAGE_LOG_FILE, REQUEST_ERROR_LOG_FILE,
+    TOKEN_DIR,
+    USAGE_LOG_FILE,
+    REQUEST_ERROR_LOG_FILE,
     DETAILED_REQUEST_HISTORY_LIMIT,
     RESPONSE_REASONING_PREVIEW_MAX_CHARS,
 )
 from util import (
     _json_default,
-    _coerce_float,
     utc_now,
     utc_now_iso,
+)
+from usage_metrics import (
     normalize_usage_payload,
     _normalize_model_name,
     _usage_event_source,
     _usage_event_estimated_cost,
     _server_request_chain_key,
-    _codex_native_session_id_from_request_id,
-    _codex_logs_service_tiers,
-    extract_item_text,
     _extract_payload_usage,
     _native_usage_event_dedupe_key,
     deduplicate_usage_events,
 )
-from event_bus import EventBus
+from usage_storage import UsageArchiveStore
 
-try:
-    from codex_native_ingest import native_turn_metadata_for_rollout as _native_turn_metadata_for_rollout
-except Exception:
-    # Excel-only installs omit this module; do not search for it per history row.
-    _native_turn_metadata_for_rollout = None
+from usage_capture import SSEUsageCapture
+from usage_records import (
+    _normalize_recorded_usage_event,
+    _usage_event_archive_summary,
+    _usage_event_archive_key,
+)
 
 
 # ---------------------------------------------------------------------------
 
-REQUEST_FINISHED_EVENT = "request_finished"
-USAGE_EVENT_RECORDED_EVENT = "usage_event_recorded"
 _NATIVE_USAGE_EVENT_DEDUPE_KEY_LIMIT = 100_000
 
 
 # ---------------------------------------------------------------------------
 
-@dataclass
-class UsageArchiveStore:
-    init_storage: Callable[[], bool] = lambda: False
-    lock: object = field(default_factory=Lock)
-    connect: Callable[[], object] = lambda: None
-    mark_unavailable: Callable[[str], None] = lambda error: None
-
 
 @dataclass
 class UsageTrackingState:
     usage_log_lock: object = field(default_factory=Lock)
+    history_loaded: bool = True
+    history_loading: bool = False
     recent_usage_events: deque[dict] = field(default_factory=deque)
     archived_usage_events: list[dict] = field(default_factory=list)
     # The dashboard asks for the combined all-time history on every update.
@@ -77,13 +70,20 @@ class UsageTrackingState:
     all_usage_events_snapshot: list[dict] | None = None
     recent_usage_events_snapshot: list[dict] | None = None
     native_lifecycle_revision: int = 0
-    native_usage_event_dedupe_keys: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    native_usage_event_dedupe_keys: OrderedDict[str, None] = field(
+        default_factory=OrderedDict
+    )
     session_request_id_lock: object = field(default_factory=Lock)
-    latest_server_request_ids_by_chain: dict[tuple[str, str], str] = field(default_factory=dict)
-    active_server_request_ids_by_request: dict[str, dict[str, str | None]] = field(default_factory=dict)
+    latest_server_request_ids_by_chain: dict[tuple[str, str], str] = field(
+        default_factory=dict
+    )
+    active_server_request_ids_by_request: dict[str, dict[str, str | None]] = field(
+        default_factory=dict
+    )
 
 
 # ---------------------------------------------------------------------------
+
 
 def request_body_session_id(request_body: dict | None = None) -> str | None:
     if not isinstance(request_body, dict):
@@ -128,7 +128,9 @@ def request_body_session_id(request_body: dict | None = None) -> str | None:
     return None
 
 
-def request_session_id(request: Request, request_body: dict | None = None) -> str | None:
+def request_session_id(
+    request: Request, request_body: dict | None = None
+) -> str | None:
     for header_name in (
         "session_id",
         "session-id",
@@ -143,29 +145,6 @@ def request_session_id(request: Request, request_body: dict | None = None) -> st
                 return normalized
 
     return request_body_session_id(request_body)
-
-
-def _normalized_api_path(path: str | None) -> str | None:
-    if not isinstance(path, str):
-        return None
-    normalized = path.strip().split("?", 1)[0].lower()
-    if not normalized:
-        return None
-    if not normalized.startswith("/"):
-        normalized = f"/{normalized}"
-    normalized = normalized.rstrip("/") or "/"
-    if normalized.startswith("/v1/"):
-        normalized = normalized[3:]
-    return normalized
-
-
-def _is_responses_api_path(path: str | None) -> bool:
-    normalized = _normalized_api_path(path)
-    if normalized is None:
-        return False
-    # The Excel gateway nests Responses under /basispoints/api, so match the
-    # endpoint suffix as well as the local API paths.
-    return normalized.endswith("/responses") or normalized.endswith("/responses/compact")
 
 
 def _drop_outbound_headers(headers: dict, header_names: tuple[str, ...]) -> None:
@@ -187,311 +166,41 @@ def _display_model_name(model_name: str | None) -> str | None:
     return _normalize_model_name(model_name) or model_name
 
 
-def _normalize_recorded_usage_event(
-    payload: dict | None,
-    *,
-    refresh_native_tiers: bool = True,
-) -> dict | None:
-    if not isinstance(payload, dict):
-        return None
-
-    normalized_event = dict(payload)
-
-    native_session_id = _codex_native_session_id_from_request_id(normalized_event.get("request_id"))
-    # Backfill native_source for events that were archived before the
-    # marker was preserved through compaction. The codex_native ingestor
-    # uses request_ids of the form "codex-native:<session>:<turn>" and the
-    # synthetic path "/native/codex/responses", so either is a reliable
-    # signal that this row originated from a Codex CLI rollout file.
-    if not normalized_event.get("native_source"):
-        request_id = normalized_event.get("request_id")
-        path = normalized_event.get("path")
-        if (
-            (isinstance(request_id, str) and request_id.startswith("codex-native:"))
-            or path == "/native/codex/responses"
-        ):
-            normalized_event["native_source"] = "codex_native"
-    native_model_provider = normalized_event.get("native_model_provider")
-    if (
-        normalized_event.get("native_source") == "codex_native"
-        and isinstance(native_model_provider, str)
-        and native_model_provider.strip().lower() == "custom"
-    ):
-        return None
-    if not normalized_event.get("session_id") and native_session_id:
-        normalized_event["session_id"] = native_session_id
-        normalized_event.setdefault("session_id_origin", "codex_native_request_id")
-    if not normalized_event.get("server_request_id"):
-        effective_native_session_id = normalized_event.get("session_id") or native_session_id
-        if (
-            normalized_event.get("native_source") == "codex_native"
-            and isinstance(effective_native_session_id, str)
-            and effective_native_session_id
-        ):
-            normalized_event["server_request_id"] = effective_native_session_id
-    if normalized_event.get("native_source") == "codex_native":
-        requested_source = normalized_event.get("native_requested_service_tier_source")
-        effective_source = normalized_event.get("native_service_tier_source")
-        should_refresh_native_tiers = refresh_native_tiers or str(
-            os.environ.get("GHCP_REFRESH_CODEX_LOG_TIERS_ON_LOAD", "")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        native_service_tiers = (
-            _codex_logs_service_tiers(
-                normalized_event.get("session_id") or native_session_id,
-                normalized_event.get("native_turn_id"),
-                normalized_event.get("started_at"),
-            )
-            if should_refresh_native_tiers
-            else {
-                "requested": normalized_event.get("native_requested_service_tier"),
-                "requested_source": requested_source,
-                "effective": normalized_event.get("native_service_tier"),
-                "effective_source": effective_source,
-            }
-        )
-        requested_native_service_tier = native_service_tiers.get("requested")
-        if isinstance(requested_native_service_tier, str) and requested_native_service_tier:
-            normalized_event["native_requested_service_tier"] = requested_native_service_tier
-            normalized_event["native_requested_service_tier_source"] = native_service_tiers.get("requested_source")
-        elif should_refresh_native_tiers and normalized_event.get("native_requested_service_tier_source") != "codex_logs_request":
-            normalized_event.pop("native_requested_service_tier", None)
-            normalized_event.pop("native_requested_service_tier_source", None)
-
-        exact_native_service_tier = native_service_tiers.get("effective")
-        if isinstance(exact_native_service_tier, str) and exact_native_service_tier:
-            normalized_event["native_service_tier"] = exact_native_service_tier
-            normalized_event["native_service_tier_source"] = native_service_tiers.get("effective_source")
-        elif should_refresh_native_tiers and not str(normalized_event.get("native_service_tier_source") or "").startswith("codex_logs_response"):
-            normalized_event.pop("native_service_tier", None)
-            normalized_event.pop("native_service_tier_source", None)
-
-        if _native_turn_metadata_for_rollout is not None and (
-            not isinstance(normalized_event.get("native_turn_duration_ms"), (int, float))
-            or not normalized_event.get("native_turn_started_at")
-        ):
-            try:
-                native_turn_metadata = _native_turn_metadata_for_rollout(
-                    normalized_event.get("native_rollout_path"),
-                    normalized_event.get("native_turn_id"),
-                )
-            except Exception:
-                native_turn_metadata = {}
-            for key, value in native_turn_metadata.items():
-                if value is not None and normalized_event.get(key) is None:
-                    normalized_event[key] = value
-
-    normalized_usage = normalize_usage_payload(normalized_event.get("usage"))
-    if isinstance(normalized_usage, dict):
-        normalized_event["usage"] = normalized_usage
-        # Costs are estimates derived from the normalized usage shape. Rebuild
-        # them on load so historical rows pick up accounting corrections (for
-        # example, reasoning tokens being a subset of output tokens) as well as
-        # current native service-tier metadata.
-        normalized_event["cost_usd"] = _usage_event_estimated_cost(
-            normalized_event,
-            usage=normalized_usage,
-        )
-    return normalized_event
-
-
-def _usage_event_archive_summary(event: dict) -> dict:
-    summary = {
-        "request_id": event.get("request_id"),
-        "started_at": event.get("started_at"),
-        "finished_at": event.get("finished_at"),
-        "path": event.get("path"),
-        "requested_model": event.get("requested_model"),
-        "resolved_model": event.get("resolved_model"),
-        "initiator": event.get("initiator"),
-        "session_id": event.get("session_id"),
-        "project_path": event.get("project_path"),
-        "client_request_id": event.get("client_request_id"),
-        "subagent": event.get("subagent"),
-        "server_request_id": event.get("server_request_id"),
-        "status_code": event.get("status_code"),
-        "success": event.get("success"),
-        "cost_usd": round(_coerce_float(event.get("cost_usd")), 6),
-    }
-
-    # Preserve native-source markers across compaction so codex_native (and
-    # any future ingested-source) traffic doesn't silently fall back to the
-    # model-name heuristic in _usage_event_source after archival.
-    for native_key in (
-        "native_source",
-        "native_origin",
-        "native_cli_version",
-        "native_model_provider",
-        "native_plan_type",
-        "native_requested_service_tier",
-        "native_requested_service_tier_source",
-        "native_service_tier",
-        "native_service_tier_source",
-        "native_reasoning_effort",
-        "native_turn_id",
-        "native_rollout_path",
-        "native_turn_started_at",
-        "native_turn_completed_at",
-        "native_turn_duration_ms",
-        "native_source_event_key",
-        "native_dedupe_key",
-        "reasoning_effort",
-    ):
-        value = event.get(native_key)
-        if value is not None:
-            summary[native_key] = value
-
-    normalized_usage = normalize_usage_payload(event.get("usage"))
-    if isinstance(normalized_usage, dict):
-        summary["usage"] = normalized_usage
-
-    return summary
-
-
-def _usage_event_archive_key(summary: dict) -> str:
-    native_dedupe_key = _native_usage_event_dedupe_key(summary)
-    if native_dedupe_key:
-        return f"native:{native_dedupe_key}"
-    request_id = summary.get("request_id")
-    if isinstance(request_id, str) and request_id:
-        return f"request:{request_id}"
-    serialized = json.dumps(summary, sort_keys=True, separators=(",", ":"), default=_json_default)
-    return f"summary:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
-
-
 def _initiator_log_label(initiator: str | None) -> str:
     return "Agent" if initiator == "agent" else "User"
 
 
 # ---------------------------------------------------------------------------
 
-class SSEUsageCapture:
-    def __init__(self, stream_type: str):
-        self.stream_type = stream_type
-        self.buffer = ""
-        self.usage = None
-        self.terminal_event_seen = False
-        self.completed_event_seen = False
-        self.terminal_event_type = None
 
-    def _has_text(self, value) -> bool:
-        if not isinstance(value, str):
-            return False
-        return bool(value)
+def _iter_usage_history_lines(file, end_offset: int, *, newest_first: bool):
+    if not newest_first:
+        file.seek(0)
+        while file.tell() < end_offset:
+            line = file.readline(end_offset - file.tell())
+            if not line:
+                break
+            yield line
+        return
 
-    def _has_part_output(self, part) -> bool:
-        return isinstance(part, dict) and any(
-            self._has_text(part.get(key))
-            for key in ("text", "input_text", "output_text", "refusal")
-        )
+    # Read from the tail in bounded blocks, splitting bytes before decoding so
+    # UTF-8 characters and large prompt rows can cross block boundaries.
+    pending = b""
+    while end_offset:
+        size = min(64 * 1024, end_offset)
+        end_offset -= size
+        file.seek(end_offset)
+        lines = (file.read(size) + pending).split(b"\n")
+        pending = lines.pop(0)
+        yield from reversed(lines)
+    if pending:
+        yield pending
 
-    def _has_item_output(self, item) -> bool:
-        if not isinstance(item, dict):
-            return False
-        if self._has_text(extract_item_text(item)):
-            return True
-        if item.get("type") in {"function_call", "custom_tool_call"}:
-            return any(self._has_text(item.get(key)) for key in ("arguments", "input"))
-        for key in ("content", "summary"):
-            parts = item.get(key)
-            if isinstance(parts, list) and any(self._has_part_output(part) for part in parts):
-                return True
-        return False
-
-    def _consume_chat_payload(self, payload: dict) -> bool:
-        if isinstance(payload.get("usage"), dict):
-            self.usage = normalize_usage_payload(payload["usage"])
-
-        choices = payload.get("choices")
-        first_choice = choices[0] if isinstance(choices, list) and choices else {}
-        delta = first_choice.get("delta") if isinstance(first_choice, dict) else {}
-        from format_translation import extract_text_from_chat_delta
-        return self._has_text(extract_text_from_chat_delta(delta))
-
-    def consume_responses_payload(self, payload: dict) -> bool:
-        event_type = str(payload.get("type", "")).strip().lower()
-        if event_type in {"response.completed", "response.failed", "response.incomplete"}:
-            self.terminal_event_seen = True
-            self.terminal_event_type = event_type
-        if event_type == "response.completed":
-            self.completed_event_seen = True
-        response = payload.get("response")
-        if isinstance(response, dict):
-            if isinstance(response.get("usage"), dict):
-                self.usage = normalize_usage_payload(response["usage"])
-        elif isinstance(payload.get("usage"), dict):
-            self.usage = normalize_usage_payload(payload["usage"])
-
-        # Lifecycle events and empty item shells are not generated tokens.
-        # Tools and reasoning are output too, even when no prose is emitted.
-        if event_type in {
-            "response.output_text.delta", "response.reasoning_text.delta",
-            "response.reasoning_summary_text.delta", "response.refusal.delta",
-            "response.function_call_arguments.delta", "response.custom_tool_call_input.delta",
-        }:
-            return self._has_text(payload.get("delta"))
-        if event_type in {
-            "response.output_text.done", "response.reasoning_text.done",
-            "response.reasoning_summary_text.done", "response.refusal.done",
-            "response.function_call_arguments.done", "response.custom_tool_call_input.done",
-        }:
-            return any(self._has_text(payload.get(key)) for key in ("text", "refusal", "arguments", "input"))
-        if event_type in {"response.output_item.added", "response.output_item.done"}:
-            return self._has_item_output(payload.get("item"))
-        if event_type in {
-            "response.content_part.added", "response.content_part.done",
-            "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
-        }:
-            return self._has_part_output(payload.get("part"))
-        if isinstance(response, dict) and isinstance(response.get("output"), list):
-            return any(self._has_item_output(item) for item in response["output"])
-        return False
-
-    def feed(self, chunk) -> bool:
-        if isinstance(chunk, bytes):
-            text = chunk.decode("utf-8", errors="replace")
-        else:
-            text = str(chunk)
-
-        self.buffer += text
-        normalized = self.buffer.replace("\r\n", "\n")
-        saw_output = False
-
-        while "\n\n" in normalized:
-            raw_block, normalized = normalized.split("\n\n", 1)
-            from format_translation import parse_sse_block
-            event_name, data = parse_sse_block(raw_block)
-            if data == "[DONE]":
-                self.terminal_event_seen = True
-                if self.terminal_event_type is None:
-                    self.terminal_event_type = "done"
-                if self.stream_type != "responses":
-                    self.completed_event_seen = True
-                continue
-            if not data:
-                continue
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if self.stream_type == "chat":
-                saw_output = self._consume_chat_payload(payload) or saw_output
-            else:
-                if event_name:
-                    payload["type"] = event_name
-                saw_output = self.consume_responses_payload(payload) or saw_output
-
-        self.buffer = normalized
-        return saw_output
-
-
-# ---------------------------------------------------------------------------
 
 class UsageTracker:
     """
     Self-contained usage tracker that owns its state, archive store, and
-    event publishing.  All mutable state lives on ``self.state`` and
+    completion callbacks. All mutable state lives on ``self.state`` and
     ``self.archive_store``; there are no module-level globals.
     """
 
@@ -500,7 +209,6 @@ class UsageTracker:
         *,
         state: UsageTrackingState | None = None,
         archive_store: UsageArchiveStore | None = None,
-        event_bus: EventBus | None = None,
         usage_log_file: str | None = None,
         error_log_file: str | None = None,
         on_request_finished: Callable | None = None,
@@ -508,25 +216,18 @@ class UsageTracker:
     ):
         self.state = state or UsageTrackingState()
         self.archive_store = archive_store or UsageArchiveStore()
-        self.event_bus = event_bus
         self.usage_log_file = usage_log_file or USAGE_LOG_FILE
         self.error_log_file = error_log_file or REQUEST_ERROR_LOG_FILE
         self.on_request_finished = on_request_finished
         self.on_usage_event_recorded = on_usage_event_recorded
 
     # ------------------------------------------------------------------
-    # Event publishing
-    # ------------------------------------------------------------------
-
-    def _publish_event(self, event_name: str, *args, **kwargs):
-        if self.event_bus is not None:
-            self.event_bus.publish(event_name, *args, **kwargs)
-
-    # ------------------------------------------------------------------
     # Delegating helpers (pure functions stay module-level)
     # ------------------------------------------------------------------
 
-    def request_session_id(self, request: Request, request_body: dict | None = None) -> str | None:
+    def request_session_id(
+        self, request: Request, request_body: dict | None = None
+    ) -> str | None:
         return request_session_id(request, request_body)
 
     def create_sse_capture(self, stream_type: str) -> SSEUsageCapture:
@@ -554,7 +255,10 @@ class UsageTracker:
 
     def _rebuild_native_usage_event_dedupe_keys_locked(self) -> None:
         self.state.native_usage_event_dedupe_keys.clear()
-        for event in (*self.state.archived_usage_events, *self.state.recent_usage_events):
+        for event in (
+            *self.state.archived_usage_events,
+            *self.state.recent_usage_events,
+        ):
             self._register_native_usage_event_locked(event)
 
     def _refresh_native_lifecycle_metadata_locked(self) -> None:
@@ -567,7 +271,7 @@ class UsageTracker:
         the existing in-memory rows from the rollout metadata before exposing
         dashboard snapshots.
         """
-        if _native_turn_metadata_for_rollout is None:
+        if usage_records._native_turn_metadata_for_rollout is None:
             return
 
         events = (*self.state.archived_usage_events, *self.state.recent_usage_events)
@@ -579,13 +283,23 @@ class UsageTracker:
                 continue
             path = event.get("native_rollout_path")
             turn_id = event.get("native_turn_id")
-            if not isinstance(path, str) or not path or not isinstance(turn_id, str) or not turn_id:
+            if (
+                not isinstance(path, str)
+                or not path
+                or not isinstance(turn_id, str)
+                or not turn_id
+            ):
                 continue
             # A completed timestamp or duration is sufficient for display.
-            if event.get("native_turn_completed_at") or event.get("native_turn_duration_ms") is not None:
+            if (
+                event.get("native_turn_completed_at")
+                or event.get("native_turn_duration_ms") is not None
+            ):
                 continue
             try:
-                metadata = _native_turn_metadata_for_rollout(path, turn_id)
+                metadata = usage_records._native_turn_metadata_for_rollout(
+                    path, turn_id
+                )
             except Exception:
                 continue
             for key, value in metadata.items():
@@ -604,18 +318,6 @@ class UsageTracker:
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
-
-    def clear_state(self):
-        with self.state.usage_log_lock:
-            self.state.recent_usage_events.clear()
-            self.state.archived_usage_events.clear()
-            self.state.all_usage_events_snapshot = None
-            self.state.recent_usage_events_snapshot = None
-            self.state.native_lifecycle_revision += 1
-            self.state.native_usage_event_dedupe_keys.clear()
-        with self.state.session_request_id_lock:
-            self.state.latest_server_request_ids_by_chain.clear()
-            self.state.active_server_request_ids_by_request.clear()
 
     def replace_history(
         self,
@@ -651,24 +353,13 @@ class UsageTracker:
         with self.state.usage_log_lock:
             return deduplicate_usage_events(self.state.archived_usage_events)
 
-    def remember_latest_server_request_id(
-        self,
-        session_id: str | None,
-        client_request_id: str | None,
-        subagent: str | None,
-        server_request_id: str | None,
-    ):
-        if not isinstance(server_request_id, str) or not server_request_id:
-            return
-        chain_key = _server_request_chain_key(session_id, client_request_id, subagent)
-        with self.state.session_request_id_lock:
-            self.state.latest_server_request_ids_by_chain[chain_key] = server_request_id
-
     # ------------------------------------------------------------------
     # Session / request context tracking (private methods)
     # ------------------------------------------------------------------
 
-    def _remember_server_request_id(self, event: dict | None):
+    def _remember_server_request_id(
+        self, event: dict | None, *, only_if_missing: bool = False
+    ):
         if not isinstance(event, dict):
             return
         chain_key = _server_request_chain_key(
@@ -680,7 +371,14 @@ class UsageTracker:
         if not isinstance(server_request_id, str) or not server_request_id:
             return
         with self.state.session_request_id_lock:
-            self.state.latest_server_request_ids_by_chain[chain_key] = server_request_id
+            if only_if_missing:
+                self.state.latest_server_request_ids_by_chain.setdefault(
+                    chain_key, server_request_id
+                )
+            else:
+                self.state.latest_server_request_ids_by_chain[chain_key] = (
+                    server_request_id
+                )
 
     def _remember_active_server_request_id(self, event: dict | None):
         if not isinstance(event, dict):
@@ -717,7 +415,9 @@ class UsageTracker:
     ) -> str | None:
         target_subagent = subagent if isinstance(subagent, str) and subagent else None
         with self.state.session_request_id_lock:
-            for context in reversed(list(self.state.active_server_request_ids_by_request.values())):
+            for context in reversed(
+                list(self.state.active_server_request_ids_by_request.values())
+            ):
                 context_subagent = context.get("subagent")
                 if isinstance(context_subagent, str):
                     context_subagent = context_subagent or None
@@ -760,10 +460,9 @@ class UsageTracker:
         client_request_id: str | None = None,
         subagent: str | None = None,
     ) -> tuple[str, str | None]:
-        forwarded_server_request_id = (
-            request.headers.get("x-request-id")
-            or request.headers.get("request-id")
-        )
+        forwarded_server_request_id = request.headers.get(
+            "x-request-id"
+        ) or request.headers.get("request-id")
 
         if session_id is None:
             session_id = request_session_id(request, request_body)
@@ -803,11 +502,15 @@ class UsageTracker:
     def _rewrite_usage_log(self, events: list[dict]):
         log_dir = os.path.dirname(self.usage_log_file) or TOKEN_DIR
         os.makedirs(log_dir, exist_ok=True)
-        temp_fd, temp_path = tempfile.mkstemp(prefix="usage-log-", suffix=".jsonl", dir=log_dir)
+        temp_fd, temp_path = tempfile.mkstemp(
+            prefix="usage-log-", suffix=".jsonl", dir=log_dir
+        )
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
                 for event in events:
-                    temp_file.write(json.dumps(event, separators=(",", ":"), default=_json_default))
+                    temp_file.write(
+                        json.dumps(event, separators=(",", ":"), default=_json_default)
+                    )
                     temp_file.write("\n")
             os.replace(temp_path, self.usage_log_file)
         except Exception:
@@ -818,18 +521,7 @@ class UsageTracker:
             raise
 
     def _delete_archived_events(self, keys: list[str]):
-        if not keys or not self.archive_store.init_storage():
-            return
-        try:
-            with self.archive_store.lock:
-                with closing(self.archive_store.connect()) as connection:
-                    connection.executemany(
-                        "DELETE FROM archived_usage_events WHERE archive_key = ?",
-                        [(key,) for key in keys],
-                    )
-                    connection.commit()
-        except Exception as exc:
-            self.archive_store.mark_unavailable(str(exc))
+        self.archive_store.delete_events(keys)
 
     def _persist_event(self, event: dict):
         if not isinstance(event, dict):
@@ -847,7 +539,9 @@ class UsageTracker:
                     f.write("\n")
             except Exception:
                 if native_dedupe_key:
-                    self.state.native_usage_event_dedupe_keys.pop(native_dedupe_key, None)
+                    self.state.native_usage_event_dedupe_keys.pop(
+                        native_dedupe_key, None
+                    )
                 raise
             self.state.recent_usage_events.append(event)
             # Preserve the combined dashboard snapshot incrementally when it
@@ -860,7 +554,6 @@ class UsageTracker:
                 self.state.recent_usage_events_snapshot.append(event)
         self._compact_if_needed()
         self._remember_server_request_id(event)
-        self._publish_event(USAGE_EVENT_RECORDED_EVENT, event)
         if self.on_usage_event_recorded is not None:
             self.on_usage_event_recorded(event)
 
@@ -869,17 +562,8 @@ class UsageTracker:
     # ------------------------------------------------------------------
 
     def load_archived_history(self):
-        if not self.archive_store.init_storage():
-            return
-
-        try:
-            with self.archive_store.lock:
-                with closing(self.archive_store.connect()) as connection:
-                    rows = connection.execute(
-                        "SELECT payload_json FROM archived_usage_events ORDER BY recorded_at ASC"
-                    ).fetchall()
-        except Exception as exc:
-            self.archive_store.mark_unavailable(str(exc))
+        rows = self.archive_store.read_rows()
+        if rows is None:
             return
 
         loaded_events: list[dict] = []
@@ -888,19 +572,27 @@ class UsageTracker:
                 payload = json.loads(row["payload_json"])
             except json.JSONDecodeError:
                 continue
-            normalized_event = _normalize_recorded_usage_event(payload, refresh_native_tiers=False)
+            normalized_event = _normalize_recorded_usage_event(
+                payload, refresh_native_tiers=False
+            )
             if normalized_event is not None:
                 loaded_events.append(normalized_event)
         with self.state.usage_log_lock:
             self.state.archived_usage_events.clear()
-            self.state.archived_usage_events.extend(deduplicate_usage_events(loaded_events))
+            self.state.archived_usage_events.extend(
+                deduplicate_usage_events(loaded_events)
+            )
             self.state.all_usage_events_snapshot = None
             self.state.recent_usage_events_snapshot = None
             self._rebuild_native_usage_event_dedupe_keys_locked()
 
     def _compact_if_needed(self):
         with self.state.usage_log_lock:
-            overflow = len(self.state.recent_usage_events) - DETAILED_REQUEST_HISTORY_LIMIT
+            if self.state.history_loading or not self.state.history_loaded:
+                return
+            overflow = (
+                len(self.state.recent_usage_events) - DETAILED_REQUEST_HISTORY_LIMIT
+            )
             if overflow <= 0:
                 return
             if not self.archive_store.init_storage():
@@ -915,29 +607,25 @@ class UsageTracker:
             for event in events_to_archive:
                 summary = _usage_event_archive_summary(event)
                 archive_key = _usage_event_archive_key(summary)
-                recorded_at = summary.get("finished_at") or summary.get("started_at") or utc_now_iso()
+                recorded_at = (
+                    summary.get("finished_at")
+                    or summary.get("started_at")
+                    or utc_now_iso()
+                )
                 archive_rows.append(
                     (
                         archive_key,
                         recorded_at,
-                        json.dumps(summary, separators=(",", ":"), default=_json_default),
+                        json.dumps(
+                            summary, separators=(",", ":"), default=_json_default
+                        ),
                     )
                 )
                 archived_summaries.append(summary)
                 archive_keys.append(archive_key)
 
             try:
-                with self.archive_store.lock:
-                    with closing(self.archive_store.connect()) as connection:
-                        connection.executemany(
-                            """
-                            INSERT INTO archived_usage_events (archive_key, recorded_at, payload_json)
-                            VALUES (?, ?, ?)
-                            ON CONFLICT(archive_key) DO NOTHING
-                            """,
-                            archive_rows,
-                        )
-                        connection.commit()
+                self.archive_store.insert_rows(archive_rows)
                 self._rewrite_usage_log(remaining_events)
             except Exception:
                 self._delete_archived_events(archive_keys)
@@ -953,7 +641,10 @@ class UsageTracker:
                     self.state.archived_usage_events.append(normalized_event)
                     archived_replacements.append((original_event, normalized_event))
 
-            if self.state.all_usage_events_snapshot is not None and archived_replacements:
+            if (
+                self.state.all_usage_events_snapshot is not None
+                and archived_replacements
+            ):
                 replacements = {
                     id(original): normalized
                     for original, normalized in archived_replacements
@@ -963,46 +654,72 @@ class UsageTracker:
                     for event in self.state.all_usage_events_snapshot
                 ]
 
-    def load_history(self):
-        if not os.path.exists(self.usage_log_file):
-            return
-
+    def load_history(self, *, limit: int | None = None):
+        if limit is not None:
+            self.state.history_loaded = False
         loaded_events: list[dict] = []
         try:
-            # Hold the same lock used by persistence: replacing the in-memory
-            # history after an unlocked file read could otherwise discard an
-            # event that completed while this reload was in progress.
             with self.state.usage_log_lock:
-                with open(self.usage_log_file, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            payload = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        normalized_event = _normalize_recorded_usage_event(payload, refresh_native_tiers=False)
-                        if normalized_event is not None:
-                            loaded_events.append(normalized_event)
+                f = open(self.usage_log_file, "rb")
+                recent_count = len(self.state.recent_usage_events)
+                self.state.history_loading = True
+                end_offset = f.seek(0, os.SEEK_END)
+            with f:
+                # Only read bytes present at the snapshot boundary. Requests
+                # can append to disk and remain visible during normalization.
+                for line in _iter_usage_history_lines(
+                    f, end_offset, newest_first=limit is not None
+                ):
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    normalized_event = _normalize_recorded_usage_event(
+                        payload, refresh_native_tiers=False
+                    )
+                    if normalized_event is not None:
+                        loaded_events.append(normalized_event)
+                        if limit is not None and len(loaded_events) >= limit:
+                            break
+            if limit is not None:
+                loaded_events.reverse()
+            loaded_events = deduplicate_usage_events(loaded_events)
 
-                loaded_events = deduplicate_usage_events(loaded_events)
+            with self.state.usage_log_lock:
+                # Compaction is deferred during loading, so this suffix is
+                # exactly the requests persisted after the file snapshot.
+                appended_events = list(self.state.recent_usage_events)[recent_count:]
                 if self.state.recent_usage_events:
                     self.state.recent_usage_events.clear()
                     self._rebuild_native_usage_event_dedupe_keys_locked()
                 # At startup the archive loader has already built these keys;
                 # only a reload needs to remove keys from replaced recent rows.
-                for event in loaded_events:
+                for event in (*loaded_events, *appended_events):
                     if self._register_native_usage_event_locked(event):
                         self.state.recent_usage_events.append(event)
                 self.state.all_usage_events_snapshot = None
-                self.state.recent_usage_events_snapshot = list(self.state.recent_usage_events)
+                self.state.recent_usage_events_snapshot = list(
+                    self.state.recent_usage_events
+                )
+                self.state.native_lifecycle_revision += 1
+                self.state.history_loaded = limit is None
+        except FileNotFoundError:
+            self.state.history_loaded = limit is None
+            return
         except OSError:
             return
+        finally:
+            with self.state.usage_log_lock:
+                self.state.history_loading = False
 
-        for event in self.snapshot_usage_events():
-            self._remember_server_request_id(event)
-        self._compact_if_needed()
+        # Restore newest-first without replacing request-chain IDs registered
+        # by live traffic while older history was loading.
+        for event in reversed(self.snapshot_usage_events()):
+            self._remember_server_request_id(event, only_if_missing=True)
+        if limit is None:
+            self._compact_if_needed()
 
     # ------------------------------------------------------------------
     # Usage event lifecycle
@@ -1021,7 +738,6 @@ class UsageTracker:
         prompt_preview: dict | None = None,
         initiator_verdict: dict | None = None,
     ) -> dict:
-        # Log the proxy request (absorbed from log_proxy_request)
         display_requested_model = _display_model_name(requested_model)
         display_resolved_model = _display_model_name(resolved_model)
         parts = [
@@ -1043,7 +759,9 @@ class UsageTracker:
         if not client_request_id and isinstance(outbound_headers, dict):
             outbound_client_request_id = outbound_headers.get("x-client-request-id")
             if isinstance(outbound_client_request_id, str):
-                normalized_outbound_client_request_id = outbound_client_request_id.strip()
+                normalized_outbound_client_request_id = (
+                    outbound_client_request_id.strip()
+                )
                 if normalized_outbound_client_request_id:
                     client_request_id = normalized_outbound_client_request_id
         subagent = request.headers.get("x-openai-subagent")
@@ -1122,11 +840,6 @@ class UsageTracker:
 
         finished_at = utc_now()
         self._forget_active_server_request_id(event.get("request_id"))
-        self._publish_event(
-            REQUEST_FINISHED_EVENT,
-            event.get("request_id"),
-            finished_at=finished_at,
-        )
         if self.on_request_finished is not None:
             callback = self.on_request_finished
             callback_kwargs = {"finished_at": finished_at}
@@ -1136,23 +849,24 @@ class UsageTracker:
                 callback_parameters = {}
             successful_parameter = callback_parameters.get("successful")
             if (
-                (
-                    successful_parameter is not None
-                    and successful_parameter.kind
-                    in {
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    }
-                )
-                or any(
-                    parameter.kind == inspect.Parameter.VAR_KEYWORD
-                    for parameter in callback_parameters.values()
-                )
+                successful_parameter is not None
+                and successful_parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+            ) or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in callback_parameters.values()
             ):
                 callback_kwargs["successful"] = status_code < 400
             callback(event.get("request_id"), **callback_kwargs)
         finished_event = {
-            **{key: value for key, value in event.items() if not str(key).startswith("_")},
+            **{
+                key: value
+                for key, value in event.items()
+                if not str(key).startswith("_")
+            },
             "finished_at": finished_at.isoformat(),
             "status_code": status_code,
             "success": status_code < 400,
@@ -1160,11 +874,17 @@ class UsageTracker:
 
         started_monotonic = event.get("_started_monotonic")
         if isinstance(started_monotonic, (int, float)):
-            finished_event["duration_ms"] = max(0, int(round((time.perf_counter() - started_monotonic) * 1000)))
+            finished_event["duration_ms"] = max(
+                0, int(round((time.perf_counter() - started_monotonic) * 1000))
+            )
 
         first_output_monotonic = event.get("_first_output_monotonic")
-        if isinstance(started_monotonic, (int, float)) and isinstance(first_output_monotonic, (int, float)):
-            finished_event["time_to_first_token_ms"] = max(0, int(round((first_output_monotonic - started_monotonic) * 1000)))
+        if isinstance(started_monotonic, (int, float)) and isinstance(
+            first_output_monotonic, (int, float)
+        ):
+            finished_event["time_to_first_token_ms"] = max(
+                0, int(round((first_output_monotonic - started_monotonic) * 1000))
+            )
 
         if upstream is not None:
             for header_name in ("x-request-id", "request-id"):
@@ -1206,7 +926,9 @@ class UsageTracker:
             # Mirror how response_text-style fields are surfaced: keep a bounded
             # excerpt so dashboards / trace viewers can show what the model was
             # actually thinking without retaining megabytes of reasoning.
-            finished_event["reasoning_text"] = reasoning_text[:RESPONSE_REASONING_PREVIEW_MAX_CHARS]
+            finished_event["reasoning_text"] = reasoning_text[
+                :RESPONSE_REASONING_PREVIEW_MAX_CHARS
+            ]
             if len(reasoning_text) > RESPONSE_REASONING_PREVIEW_MAX_CHARS:
                 finished_event["reasoning_text_truncated"] = True
                 finished_event["reasoning_text_chars"] = len(reasoning_text)
@@ -1240,7 +962,9 @@ class UsageTracker:
         with self.state.usage_log_lock:
             self._refresh_native_lifecycle_metadata_locked()
             if self.state.recent_usage_events_snapshot is None:
-                self.state.recent_usage_events_snapshot = deduplicate_usage_events(self.state.recent_usage_events)
+                self.state.recent_usage_events_snapshot = deduplicate_usage_events(
+                    self.state.recent_usage_events
+                )
             return list(self.state.recent_usage_events_snapshot)
 
     def snapshot_all_usage_events(self) -> list[dict]:
@@ -1273,31 +997,12 @@ class UsageTracker:
     def compact_history_if_needed(self):
         return self._compact_if_needed()
 
-    def record_usage_event(self, event: dict):
-        return self._persist_event(event)
-
     def latest_server_request_id(
         self,
         session_id: str | None,
         client_request_id: str | None,
         subagent: str | None,
     ) -> str | None:
-        return self._get_latest_server_request_id(session_id, client_request_id, subagent)
-
-
-# ---------------------------------------------------------------------------
-
-def log_proxy_request(
-    request: Request,
-    requested_model: str | None,
-    resolved_model: str | None,
-    initiator: str | None,
-):
-    """Backward-compatible logging stub.
-
-    In the refactored design this logging is absorbed into
-    ``UsageTracker.start_event()``.  This function is kept so that
-    existing mock patches in tests (``mock.patch.object(usage_tracking,
-    "log_proxy_request")``) don't break.
-    """
-    pass
+        return self._get_latest_server_request_id(
+            session_id, client_request_id, subagent
+        )

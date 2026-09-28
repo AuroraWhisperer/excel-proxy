@@ -1,7 +1,9 @@
 import unittest
 
 from dashboard import _prepare_usage_event
-from util import _usage_event_model_name
+from usage_metrics import (
+    _usage_event_model_name,
+)
 
 
 class UsageModelIdentityTests(unittest.TestCase):

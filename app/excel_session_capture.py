@@ -106,10 +106,18 @@ def load_macos_excel_session(website_data: Path | None = None) -> dict[str, str]
             value = row[0]
             text = value.decode("utf-16-le") if isinstance(value, bytes) else value
             if not isinstance(text, str):
-                raise ValueError("the WebKit LocalStorage value has an unsupported type")
+                raise ValueError(
+                    "the WebKit LocalStorage value has an unsupported type"
+                )
             headers, expires_at = _cached_session_headers(json.loads(text))
             candidates.append((expires_at, headers))
-        except (OSError, sqlite3.Error, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            OSError,
+            sqlite3.Error,
+            UnicodeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             errors.append(f"{database}: {exc}")
     if candidates:
         return max(candidates, key=lambda item: item[0])[1]
@@ -222,7 +230,9 @@ def _leveldb_table_entries(path: Path):
             return _decompress_snappy(compressed)
         raise ValueError("unsupported LevelDB compression")
 
-    for _, encoded_handle in _leveldb_block_entries(read_block(index_offset, index_size)):
+    for _, encoded_handle in _leveldb_block_entries(
+        read_block(index_offset, index_size)
+    ):
         block_offset, handle_offset = _decode_leveldb_varint(encoded_handle, 0)
         block_size, _ = _decode_leveldb_varint(encoded_handle, handle_offset)
         yield from _leveldb_block_entries(read_block(block_offset, block_size))
@@ -284,7 +294,9 @@ def load_windows_excel_session(webview_root: Path | None = None) -> dict[str, st
     )
 
 
-def refresh_macos_excel_session(session_store, *, force: bool = False, website_data: Path | None = None) -> dict[str, object]:
+def refresh_macos_excel_session(
+    session_store, *, force: bool = False, website_data: Path | None = None
+) -> dict[str, object]:
     if sys.platform != "darwin":
         return session_store.status()
     status = session_store.status()
@@ -301,7 +313,9 @@ def refresh_macos_excel_session(session_store, *, force: bool = False, website_d
             return session_store.status()
 
 
-def refresh_windows_excel_session(session_store, *, force: bool = False, webview_root: Path | None = None) -> dict[str, object]:
+def refresh_windows_excel_session(
+    session_store, *, force: bool = False, webview_root: Path | None = None
+) -> dict[str, object]:
     if sys.platform != "win32":
         return session_store.status()
     status = session_store.status()

@@ -161,61 +161,13 @@ def codex_subagent_identity(body: dict | None) -> str | None:
     return "codex:subagent"
 
 
-def codex_subagent_role(body: dict | None) -> str | None:
-    """Return the semantic role of a current Codex child thread."""
-    mappings = _metadata_mappings(body)
-    if not mappings:
-        return None
-
-    nested = []
-    for mapping in mappings:
-        agent_mapping = _nested_agent_mapping(mapping)
-        if agent_mapping is not None:
-            nested.append(agent_mapping)
-
-    for mapping in [*reversed(nested), *reversed(mappings)]:
-        for key in (
-            "agent_role",
-            "agent_name",
-            "agent_nickname",
-            "agent_type",
-            "role",
-        ):
-            value = _non_empty_string(mapping.get(key))
-            if value:
-                return value
-    return None
-
-
-def codex_parent_affinity(body: dict | None) -> str | None:
-    """Return the explicit parent-thread affinity for a current Codex child.
-
-    Current Codex child requests carry their worker identity and the real
-    parent thread in ``client_metadata``.  The metadata itself is not sent to
-    Copilot, but the parent reference must be retained long enough to derive
-    the same session/interaction hierarchy as the root request.  Do not infer
-    a parent from a generic session id: only use a concrete Codex parent-thread
-    marker, and only for requests that are actually marked as subagents.
-    """
-    if codex_subagent_identity(body) is None:
-        return None
-    return _codex_metadata_value(
-        body,
-        "x-codex-parent-thread-id",
-        "x_codex_parent_thread_id",
-        "parent_thread_id",
-        "parentThreadId",
-    )
-
-
 def codex_session_id(body: dict | None) -> str | None:
     """Return the root Codex session id carried in client metadata.
 
     Codex's current Responses requests keep this identifier in
     ``client_metadata`` rather than the top-level ``session_id`` field.  Both
     root and child threads carry it, so it is suitable for usage grouping and
-    other local session bookkeeping; parent routing still requires the more
-    specific :func:`codex_parent_affinity` above.
+    other local session bookkeeping.
     """
     return _codex_metadata_value(body, "session_id", "sessionId")
 
@@ -237,27 +189,6 @@ def _codex_metadata_value(body: dict | None, *keys: str) -> str | None:
     return None
 
 
-def codex_thread_id(body: dict | None) -> str | None:
-    """Return the current root or child thread identifier."""
-    return _codex_metadata_value(body, "thread_id", "threadId")
-
-
-def codex_turn_id(body: dict | None) -> str | None:
-    """Return the current Codex turn identifier.
-
-    A turn id remains stable across model/tool continuations and in-turn
-    steering, then changes after completion or interruption.  That is the
-    lifecycle boundary Copilot uses for its task and interaction identities.
-    """
-    return _codex_metadata_value(body, "turn_id", "turnId")
-
-
-def codex_thread_source(body: dict | None) -> str | None:
-    """Return the normalized Codex lifecycle source (for example ``user``)."""
-    value = _codex_metadata_value(body, "thread_source", "threadSource")
-    return value.lower() if value else None
-
-
 def _patched_spawn_agent_tool(tool: dict) -> tuple[dict, bool]:
     if tool.get("name") != "spawn_agent":
         return tool, False
@@ -266,7 +197,9 @@ def _patched_spawn_agent_tool(tool: dict) -> tuple[dict, bool]:
         return tool, False
 
     parameters = tool.get("parameters")
-    properties = parameters.get("properties") if isinstance(parameters, Mapping) else None
+    properties = (
+        parameters.get("properties") if isinstance(parameters, Mapping) else None
+    )
     # This is the Codex multi_agent_v1 contract that produced the captured
     # failure. Newer collaboration tools use a different fork shape and do not
     # accept model overrides, so leave those schemas untouched.
@@ -361,12 +294,7 @@ def normalize_codex_agent_tools(
 
 
 __all__ = [
-    "codex_parent_affinity",
     "codex_session_id",
     "codex_subagent_identity",
-    "codex_subagent_role",
-    "codex_thread_id",
-    "codex_thread_source",
-    "codex_turn_id",
     "normalize_codex_agent_tools",
 ]

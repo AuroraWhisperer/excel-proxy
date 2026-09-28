@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 import background_proxy
-import proxy
+import upstream_client
 
 
 class ProxyEnvironmentTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class ProxyEnvironmentTests(unittest.TestCase):
             },
             clear=True,
         ):
-            applied = proxy._apply_upstream_proxy_env_aliases()
+            applied = upstream_client._apply_upstream_proxy_env_aliases()
 
             self.assertIn("HTTPS_PROXY", applied)
             self.assertIn("HTTP_PROXY", applied)
@@ -34,7 +34,7 @@ class ProxyEnvironmentTests(unittest.TestCase):
             },
             clear=True,
         ):
-            applied = proxy._apply_upstream_proxy_env_aliases()
+            applied = upstream_client._apply_upstream_proxy_env_aliases()
 
             self.assertNotIn("HTTPS_PROXY", applied)
             self.assertEqual(os.environ["HTTPS_PROXY"], "http://already-set:80")
@@ -47,13 +47,13 @@ class ProxyEnvironmentTests(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertTrue(proxy._upstream_proxy_configured())
+            self.assertTrue(upstream_client._upstream_proxy_configured())
             self.assertEqual(
-                proxy._configured_upstream_tls_verify(True),
+                upstream_client._configured_upstream_tls_verify(True),
                 (False, "proxy_default"),
             )
             self.assertEqual(
-                proxy._configured_upstream_http2(True),
+                upstream_client._configured_upstream_http2(True),
                 (False, "proxy_default"),
             )
 
@@ -68,11 +68,11 @@ class ProxyEnvironmentTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(
-                proxy._configured_upstream_tls_verify(True),
+                upstream_client._configured_upstream_tls_verify(True),
                 (True, "GHCP_UPSTREAM_TLS_VERIFY"),
             )
             self.assertEqual(
-                proxy._configured_upstream_http2(True),
+                upstream_client._configured_upstream_http2(True),
                 (True, "GHCP_UPSTREAM_HTTP2"),
             )
 

@@ -102,7 +102,7 @@ class ExcelUpstreamTests(unittest.TestCase):
         self.assertIn("native run_officejs", tool_prompt)
         self.assertIn("functions.run_officejs", tool_prompt)
         self.assertIn("inner name is never run_officejs", tool_prompt)
-        self.assertIn('\"name\":\"exec_command\"', tool_prompt)
+        self.assertIn('{"name":"TOOL_NAME","arguments":{}}', tool_prompt)
         self.assertIn('"name":"demo"', tool_prompt)
         self.assertEqual(body["input"][3]["role"], "user")
         self.assertNotIn("tools", body)
@@ -120,13 +120,18 @@ class ExcelUpstreamTests(unittest.TestCase):
         }
         for model_id, threshold in expected.items():
             with self.subTest(model=model_id):
-                body = excel_upstream.prepare_responses_body({
-                    "model": model_id,
-                    "input": "Hello",
-                })
-                self.assertEqual(body["context_management"], [
-                    {"type": "compaction", "compact_threshold": threshold},
-                ])
+                body = excel_upstream.prepare_responses_body(
+                    {
+                        "model": model_id,
+                        "input": "Hello",
+                    }
+                )
+                self.assertEqual(
+                    body["context_management"],
+                    [
+                        {"type": "compaction", "compact_threshold": threshold},
+                    ],
+                )
 
     def test_explicit_context_management_is_preserved(self):
         for context_management in (
@@ -134,35 +139,59 @@ class ExcelUpstreamTests(unittest.TestCase):
             [{"type": "compaction", "compact_threshold": 245_000}],
         ):
             with self.subTest(context_management=context_management):
-                body = excel_upstream.prepare_responses_body({
-                    "model": "gpt-6-astra-excel",
-                    "input": "Hello",
-                    "context_management": context_management,
-                })
+                body = excel_upstream.prepare_responses_body(
+                    {
+                        "model": "gpt-6-astra-excel",
+                        "input": "Hello",
+                        "context_management": context_management,
+                    }
+                )
                 self.assertEqual(body["context_management"], context_management)
 
     def test_requested_summaries_use_the_excel_gateway_auto_mode(self):
         for summary in ("auto", "concise", "detailed"):
             with self.subTest(summary=summary):
-                body = excel_upstream.prepare_responses_body({
-                    "model": "gpt-6-astra-excel",
-                    "input": "Hello",
-                    "reasoning": {"effort": "x-high", "summary": summary},
-                })
-                self.assertEqual(body["reasoning"], {"effort": "xhigh", "summary": "auto"})
+                body = excel_upstream.prepare_responses_body(
+                    {
+                        "model": "gpt-6-astra-excel",
+                        "input": "Hello",
+                        "reasoning": {"effort": "x-high", "summary": summary},
+                    }
+                )
+                self.assertEqual(
+                    body["reasoning"], {"effort": "xhigh", "summary": "auto"}
+                )
                 self.assertEqual(body["reasoning"]["effort"], body["reasoning_effort"])
 
         for reasoning in ({}, {"summary": "none"}, {"summary": None}):
             with self.subTest(reasoning=reasoning):
-                body = excel_upstream.prepare_responses_body({"input": "Hello", "reasoning": reasoning})
+                body = excel_upstream.prepare_responses_body(
+                    {"input": "Hello", "reasoning": reasoning}
+                )
                 self.assertNotIn("reasoning", body)
 
     def test_excel_preserves_images_in_messages_and_tool_results(self):
-        image = {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "high"}
+        image = {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,AAAA",
+            "detail": "high",
+        }
         for item in (
-            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Explain this"}, image]},
-            {"type": "function_call_output", "call_id": "call_image", "output": [image]},
-            {"type": "custom_tool_call_output", "call_id": "call_image", "output": [image]},
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Explain this"}, image],
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_image",
+                "output": [image],
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_image",
+                "output": [image],
+            },
         ):
             with self.subTest(item_type=item["type"]):
                 body = excel_upstream.prepare_responses_body({"input": [item]})
@@ -192,7 +221,9 @@ class ExcelUpstreamTests(unittest.TestCase):
         for model_id in excel_upstream.MODEL_IDS:
             with self.subTest(model_id=model_id):
                 self.assertEqual(
-                    excel_upstream.LOCAL_MODEL_CAPABILITIES[model_id]["reasoning_efforts"],
+                    excel_upstream.LOCAL_MODEL_CAPABILITIES[model_id][
+                        "reasoning_efforts"
+                    ],
                     ["medium", "high", "xhigh"]
                     if model_id == "gpt-6-astra-excel"
                     else ["low", "medium", "high", "xhigh"],
@@ -232,29 +263,14 @@ class ExcelUpstreamTests(unittest.TestCase):
         }
         first = excel_upstream.prepare_responses_body(source)
         second = excel_upstream.prepare_responses_body(source)
-        self.assertEqual(
-            first["metadata"]["task_id"], second["metadata"]["task_id"]
-        )
+        self.assertEqual(first["metadata"]["task_id"], second["metadata"]["task_id"])
         other = excel_upstream.prepare_responses_body(
             {**source, "prompt_cache_key": "conversation-2"}
         )
-        self.assertNotEqual(
-            first["metadata"]["task_id"], other["metadata"]["task_id"]
-        )
+        self.assertNotEqual(first["metadata"]["task_id"], other["metadata"]["task_id"])
 
-    def test_excel_upstream_path_counts_as_a_responses_api_path(self):
+    def test_responses_affinity_headers_remove_per_request_ids(self):
         import usage_tracking
-
-        # Copilot's per-request affinity headers (x-request-id,
-        # x-github-request-id, x-agent-task-id) are stripped for Responses
-        # upstreams. The Excel gateway's path must take that branch too, or a
-        # fresh identifier is stamped on every otherwise identical request.
-        self.assertTrue(usage_tracking._is_responses_api_path("/basispoints/api/responses"))
-        self.assertTrue(usage_tracking._is_responses_api_path("/responses"))
-        self.assertTrue(usage_tracking._is_responses_api_path("/v1/responses"))
-        self.assertTrue(usage_tracking._is_responses_api_path("/responses/compact"))
-        self.assertFalse(usage_tracking._is_responses_api_path("/chat/completions"))
-        self.assertFalse(usage_tracking._is_responses_api_path("/messages"))
 
         outbound = {
             "authorization": "Bearer x",
@@ -279,8 +295,12 @@ class ExcelUpstreamTests(unittest.TestCase):
                 }
             ],
         }
-        first = json.dumps(excel_upstream.prepare_responses_body(source), sort_keys=True)
-        second = json.dumps(excel_upstream.prepare_responses_body(source), sort_keys=True)
+        first = json.dumps(
+            excel_upstream.prepare_responses_body(source), sort_keys=True
+        )
+        second = json.dumps(
+            excel_upstream.prepare_responses_body(source), sort_keys=True
+        )
         # A retry of the same turn must not look like new work to the upstream.
         self.assertEqual(first, second)
 
@@ -323,9 +343,7 @@ class ExcelUpstreamTests(unittest.TestCase):
                 "output": "done",
             }
         ]
-        later = excel_upstream.prepare_responses_body(
-            {**base, "input": tool_history}
-        )
+        later = excel_upstream.prepare_responses_body({**base, "input": tool_history})
         self.assertEqual(first["metadata"]["task_id"], later["metadata"]["task_id"])
         self.assertEqual(first["metadata"]["turn_id"], later["metadata"]["turn_id"])
         self.assertEqual(later["metadata"]["agent_iteration"], "2")
@@ -344,7 +362,9 @@ class ExcelUpstreamTests(unittest.TestCase):
             }
         )
         self.assertEqual(first["metadata"]["task_id"], next_turn["metadata"]["task_id"])
-        self.assertNotEqual(first["metadata"]["turn_id"], next_turn["metadata"]["turn_id"])
+        self.assertNotEqual(
+            first["metadata"]["turn_id"], next_turn["metadata"]["turn_id"]
+        )
         self.assertEqual(next_turn["metadata"]["agent_iteration"], "1")
 
     def test_encrypted_reasoning_is_replayed_and_bare_reasoning_dropped(self):
@@ -503,9 +523,7 @@ class ExcelUpstreamTests(unittest.TestCase):
                 },
                 separators=(",", ":"),
             ),
-            "internal_chat_message_metadata_passthrough": {
-                "turn_id": "native-turn"
-            },
+            "internal_chat_message_metadata_passthrough": {"turn_id": "native-turn"},
         }
         tool_call = excel_upstream.extract_native_client_tool_call(
             {
@@ -600,7 +618,9 @@ class ExcelUpstreamTests(unittest.TestCase):
                 }
             ]
         }
-        malformed_inner = r'{"name":"exec_command","arguments":{"cmd":"rg -n \( pattern"}}'
+        malformed_inner = (
+            r'{"name":"exec_command","arguments":{"cmd":"rg -n \( pattern"}}'
+        )
         native = {
             "type": "function_call",
             "call_id": "call_repair_invalid_backslash",
@@ -673,9 +693,7 @@ class ExcelUpstreamTests(unittest.TestCase):
         for _ in range(2):
             envelope = {
                 "name": "run_officejs",
-                "arguments": {
-                    "code": json.dumps(envelope, separators=(",", ":"))
-                },
+                "arguments": {"code": json.dumps(envelope, separators=(",", ":"))},
             }
         native = {
             "type": "function_call",
@@ -712,9 +730,7 @@ class ExcelUpstreamTests(unittest.TestCase):
         for _ in range(3):
             envelope = {
                 "name": "run_officejs",
-                "arguments": {
-                    "code": json.dumps(envelope, separators=(",", ":"))
-                },
+                "arguments": {"code": json.dumps(envelope, separators=(",", ":"))},
             }
         native = {
             "type": "function_call",
@@ -726,9 +742,7 @@ class ExcelUpstreamTests(unittest.TestCase):
         }
 
         self.assertIsNone(
-            excel_upstream.extract_native_client_tool_call(
-                {"output": [native]}, source
-            )
+            excel_upstream.extract_native_client_tool_call({"output": [native]}, source)
         )
 
     def test_run_officejs_transport_validates_unwrapped_arguments(self):
@@ -761,9 +775,7 @@ class ExcelUpstreamTests(unittest.TestCase):
         }
 
         self.assertIsNone(
-            excel_upstream.extract_native_client_tool_call(
-                {"output": [native]}, source
-            )
+            excel_upstream.extract_native_client_tool_call({"output": [native]}, source)
         )
 
     def test_custom_transport_result_returns_as_native_function_output(self):
@@ -853,7 +865,9 @@ class ExcelUpstreamTests(unittest.TestCase):
             "id": "fc_custom_prepare",
             "call_id": call_id,
             "name": "run_officejs",
-            "arguments": json.dumps({"code": json.dumps({"name": "apply_patch", "input": "patch"})}),
+            "arguments": json.dumps(
+                {"code": json.dumps({"name": "apply_patch", "input": "patch"})}
+            ),
             "status": "completed",
         }
         excel_upstream._remember_native_call(native)
@@ -881,11 +895,7 @@ class ExcelUpstreamTests(unittest.TestCase):
             }
         )
 
-        replay = [
-            item
-            for item in body["input"]
-            if item.get("call_id") == call_id
-        ]
+        replay = [item for item in body["input"] if item.get("call_id") == call_id]
         self.assertEqual(replay[0], native)
         self.assertEqual(replay[1]["type"], "function_call_output")
         self.assertTrue(replay[1]["id"].startswith("fc_"))
@@ -1048,38 +1058,54 @@ class ExcelUpstreamTests(unittest.TestCase):
             "tools": [
                 {"type": "function", "name": "exec_command"},
                 {"type": "custom", "name": "apply_patch"},
-                {"type": "namespace", "name": "image_gen", "tools": [
-                    {"type": "function", "name": "imagegen",
-                     "description": "Generate an image from a prompt."},
-                ]},
+                {
+                    "type": "namespace",
+                    "name": "image_gen",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "imagegen",
+                            "description": "Generate an image from a prompt.",
+                        },
+                    ],
+                },
             ],
             "input": [
                 excel_upstream._message_item("developer", "Follow repository rules."),
-                excel_upstream._message_item("user", "Inspect, edit, and generate an image."),
+                excel_upstream._message_item(
+                    "user", "Inspect, edit, and generate an image."
+                ),
             ],
         }
         first = excel_upstream.prepare_responses_body(source)
-        self.assertEqual(first["input"][0]["content"][0]["text"], source["instructions"])
+        self.assertEqual(
+            first["input"][0]["content"][0]["text"], source["instructions"]
+        )
         self.assertIn(source["input"][0], first["input"])
         protocol = first["input"][1]["content"][0]["text"]
         self.assertNotIn("Excel", protocol)
         self.assertNotIn("workbook", protocol)
         self.assertIn('"name":"image_gen.imagegen"', protocol)
         previous = first
-        for index, envelope in enumerate([
-            {"name": "exec_command", "arguments": {"cmd": "pwd"}},
-            {"name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"},
-            {"name": "image_gen.imagegen", "arguments": {"prompt": "A blue bird"}},
-        ]):
+        for index, envelope in enumerate(
+            [
+                {"name": "exec_command", "arguments": {"cmd": "pwd"}},
+                {"name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"},
+                {"name": "image_gen.imagegen", "arguments": {"prompt": "A blue bird"}},
+            ]
+        ):
             with self.subTest(tool=envelope["name"]):
                 call_id = f"call_workflow_{index}"
                 native = {
-                    "type": "function_call", "id": f"fc_workflow_{index}",
-                    "call_id": call_id, "name": "run_officejs",
+                    "type": "function_call",
+                    "id": f"fc_workflow_{index}",
+                    "call_id": call_id,
+                    "name": "run_officejs",
                     "arguments": json.dumps({"code": json.dumps(envelope)}),
                 }
                 tool_call = excel_upstream.extract_native_client_tool_call(
-                    {"output": [native]}, source,
+                    {"output": [native]},
+                    source,
                 )
                 self.assertIsNotNone(tool_call)
                 if envelope["name"] == "apply_patch":
@@ -1088,21 +1114,40 @@ class ExcelUpstreamTests(unittest.TestCase):
                     output_type = "custom_tool_call_output"
                 else:
                     self.assertEqual(tool_call["type"], "function_call")
-                    self.assertEqual(json.loads(tool_call["arguments"]), envelope["arguments"])
+                    self.assertEqual(
+                        json.loads(tool_call["arguments"]), envelope["arguments"]
+                    )
                     output_type = "function_call_output"
                 if envelope["name"] == "image_gen.imagegen":
                     self.assertEqual(tool_call["namespace"], "image_gen")
                     self.assertEqual(tool_call["name"], "imagegen")
-                reasoning = {"type": "reasoning", "summary": [], "encrypted_content": f"state-{index}"}
-                source["input"].extend([
-                    reasoning, tool_call,
-                    {"type": output_type, "call_id": call_id, "output": "Completed"},
-                ])
+                reasoning = {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": f"state-{index}",
+                }
+                source["input"].extend(
+                    [
+                        reasoning,
+                        tool_call,
+                        {
+                            "type": output_type,
+                            "call_id": call_id,
+                            "output": "Completed",
+                        },
+                    ]
+                )
                 replay = excel_upstream.prepare_responses_body(source)
-                self.assertEqual(replay["metadata"]["task_id"], first["metadata"]["task_id"])
-                self.assertEqual(replay["metadata"]["turn_id"], first["metadata"]["turn_id"])
+                self.assertEqual(
+                    replay["metadata"]["task_id"], first["metadata"]["task_id"]
+                )
+                self.assertEqual(
+                    replay["metadata"]["turn_id"], first["metadata"]["turn_id"]
+                )
                 self.assertEqual(replay["metadata"]["agent_iteration"], str(index + 2))
-                self.assertEqual(replay["input"][:len(previous["input"])], previous["input"])
+                self.assertEqual(
+                    replay["input"][: len(previous["input"])], previous["input"]
+                )
                 self.assertIn(reasoning, replay["input"])
                 self.assertEqual(replay["input"][-2], native)
                 self.assertEqual(replay["input"][-1]["type"], "function_call_output")
@@ -1203,7 +1248,9 @@ class ExcelUpstreamTests(unittest.TestCase):
                     {
                         "type": "message",
                         "role": "user",
-                        "content": [{"type": "input_text", "text": "Stable environment"}],
+                        "content": [
+                            {"type": "input_text", "text": "Stable environment"}
+                        ],
                         **metadata,
                     },
                     {
@@ -1336,9 +1383,7 @@ class ExcelUpstreamTests(unittest.TestCase):
             ],
             {"shell_command": "function"},
         )
-        self.assertEqual(
-            items[1]["output"], "(tool call succeeded with no output)"
-        )
+        self.assertEqual(items[1]["output"], "(tool call succeeded with no output)")
 
     def test_native_plan_status_aliases_are_normalized(self):
         source = {
@@ -1424,9 +1469,7 @@ class ExcelUpstreamTests(unittest.TestCase):
         self.assertEqual(tool_call["type"], "function_call")
         self.assertEqual(tool_call["name"], "shell_command")
         self.assertTrue(
-            tool_call["call_id"].startswith(
-                excel_upstream.CLIENT_MARKER_CALL_ID_PREFIX
-            )
+            tool_call["call_id"].startswith(excel_upstream.CLIENT_MARKER_CALL_ID_PREFIX)
         )
         self.assertEqual(
             json.loads(tool_call["arguments"]),
@@ -1631,6 +1674,7 @@ class ExcelUpstreamTests(unittest.TestCase):
             ],
         )
 
+
 class ExcelStreamTransformTests(unittest.TestCase):
     SOURCE_BODY = {
         "tools": [
@@ -1653,7 +1697,7 @@ class ExcelStreamTransformTests(unittest.TestCase):
     ) -> list[tuple[str, dict]]:
         import proxy as proxy_module
 
-        transform = proxy_module._excel_tool_stream_transform(
+        transform = proxy_module._excel_response_processor().tool_stream_transform(
             source_body if source_body is not None else self.SOURCE_BODY
         )
 
@@ -1737,9 +1781,7 @@ class ExcelStreamTransformTests(unittest.TestCase):
                                 {
                                     "type": "message",
                                     "role": "assistant",
-                                    "content": [
-                                        {"type": "output_text", "text": text}
-                                    ],
+                                    "content": [{"type": "output_text", "text": text}],
                                 }
                             ],
                             "usage": {"input_tokens": 5, "output_tokens": 7},
@@ -1760,9 +1802,7 @@ class ExcelStreamTransformTests(unittest.TestCase):
         self.assertNotIn("response.output_text.delta", names)
         self.assertNotIn("response.output_text.done", names)
         self.assertIn("response.function_call_arguments.done", names)
-        completed = dict(events)[
-            "response.completed"
-        ]["response"]
+        completed = dict(events)["response.completed"]["response"]
         self.assertEqual(completed["model"], "gpt-5.6-sol-excel")
         self.assertEqual(completed["output"][0]["type"], "function_call")
         self.assertEqual(completed["output"][0]["name"], "shell_command")
@@ -2147,8 +2187,7 @@ class ExcelStreamTransformTests(unittest.TestCase):
 
     def test_marker_without_valid_tool_is_released_as_text(self):
         marker = (
-            '<codex_tool_call>{"name":"unknown_tool","arguments":{}}'
-            "</codex_tool_call>"
+            '<codex_tool_call>{"name":"unknown_tool","arguments":{}}</codex_tool_call>'
         )
         events = self._collect(self._stream(marker))
         deltas = [

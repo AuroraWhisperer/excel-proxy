@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>用量与费用 · Excel Proxy</title>
+    <link rel="stylesheet" href="/ui/shared.css" />
+    <script src="/ui/account-login.js" defer></script>
+  </head>
+  <body class="usage-page">
+    <main>
+      <nav class="page-nav" aria-label="页面导航">
+        <a href="/ui">连接与设置</a><a href="/ui/requests">最近请求</a
+        ><a href="/ui/usage" aria-current="page">用量与费用</a>
+      </nav>
+      <p id="page-error" class="error" role="alert" hidden></p>
+      <div class="page-heading section-heading">
+        <div class="toolbar">
+          <span id="live-status" class="status" role="status">正在读取…</span
+          ><button id="import-accounts">导入 JSON</button
+          ><button id="start-login" class="primary">登录添加账号</button
+          ><button id="auto-login">账号密码登录</button>
+        </div>
+        <input
+          id="account-file"
+          type="file"
+          accept=".json,application/json"
+          aria-label="选择账号 JSON 文件"
+          hidden
+        />
+      </div>
+      <section
+        id="account-panel"
+        class="content-panel account-panel"
+        aria-labelledby="accounts-heading"
+        aria-busy="true"
+      >
+        <div class="section-heading">
+          <div class="session-title">
+            <h2 id="accounts-heading">账号额度</h2>
+            <span id="account-count" class="muted">0 个</span>
+            <p id="account-feedback" class="feedback" role="status"></p>
+          </div>
+          <div class="toolbar">
+            <button
+              id="refresh-accounts"
+              title="逐个查询所有账号的最新额度，并同步统计"
+              disabled
+            >
+              查询全部额度
+            </button>
+          </div>
+        </div>
+        <div id="login-status" class="login-status" hidden>
+          <p id="login-message" role="status"></p>
+          <button id="cancel-login" hidden>取消登录</button>
+        </div>
+        <div id="account-empty" class="account-empty">
+          <p>暂无账号</p>
+          <p class="hint">登录或导入账号后，即可查询额度。</p>
+        </div>
+        <div
+          id="account-table-wrap"
+          class="table-wrap account-table-wrap"
+          role="region"
+          aria-label="账号额度，可横向滚动"
+          tabindex="0"
+          hidden
+        >
+          <table class="account-table">
+            <thead>
+              <tr>
+                <th scope="col">邮箱</th>
+                <th scope="col">平台 / 类型</th>
+                <th scope="col">状态</th>
+                <th scope="col">额度周期</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody id="account-list"></tbody>
+          </table>
+        </div>
+      </section>
+      <details
+        id="usage-details"
+        class="content-panel usage-detail"
+        aria-label="当前账号本期用量与费用"
+      >
+        <summary>用量明细</summary>
+        <div class="section-heading">
+          <div>
+            <h2>本期用量</h2>
+            <p id="usage-scope" class="muted">
+              仅统计此账号本期经代理发送的请求。
+            </p>
+          </div>
+          <label
+            id="stats-window-control"
+            class="toolbar"
+            for="stats-window"
+            hidden
+            >统计周期<select id="stats-window"></select
+          ></label>
+        </div>
+        <dl class="usage" aria-label="当前账号本期用量">
+          <div>
+            <dt>请求次数</dt>
+            <dd id="request-count">—</dd>
+          </div>
+          <div>
+            <dt>输入 token（含缓存）</dt>
+            <dd id="input-count">—</dd>
+          </div>
+          <div>
+            <dt>缓存命中 token</dt>
+            <dd id="cached-count">—</dd>
+          </div>
+          <div>
+            <dt>输出 token</dt>
+            <dd id="output-count">—</dd>
+          </div>
+        </dl>
+        <section
+          class="cost-estimate"
+          aria-labelledby="cost-heading"
+          id="cost-panel"
+          aria-busy="true"
+        >
+          <div class="section-heading">
+            <div class="session-title">
+              <h2 id="cost-heading">API 费用估算</h2>
+              <span id="cost-status" class="status" role="status"
+                >正在读取…</span
+              >
+            </div>
+            <span id="cost-period" class="muted">本期 · USD</span>
+          </div>
+          <p class="muted">
+            按本地参考单价估算，不代表实际扣费或订阅剩余额度。
+          </p>
+          <dl class="cost-breakdown">
+            <div class="cost-sum">
+              <dt>已计价合计</dt>
+              <dd id="cost-total">—</dd>
+            </div>
+            <div>
+              <dt>普通输入</dt>
+              <dd id="cost-input">—</dd>
+            </div>
+            <div>
+              <dt>缓存读取</dt>
+              <dd id="cost-cached">—</dd>
+            </div>
+            <div>
+              <dt>缓存写入</dt>
+              <dd id="cost-write">—</dd>
+            </div>
+            <div>
+              <dt>输出</dt>
+              <dd id="cost-output">—</dd>
+            </div>
+          </dl>
+          <p id="cost-feedback" class="feedback" role="status">
+            正在读取本期记录…
+          </p>
+          <div
+            class="table-wrap"
+            role="region"
+            aria-label="按模型的费用与用量"
+            tabindex="0"
+          >
+            <table class="cost-table">
+              <thead>
+                <tr>
+                  <th scope="col">模型</th>
+                  <th scope="col">请求</th>
+                  <th scope="col">普通输入</th>
+                  <th scope="col">缓存读取</th>
+                  <th scope="col">输出</th>
+                  <th scope="col">估算费用</th>
+                </tr>
+              </thead>
+              <tbody id="cost-model-rows">
+                <tr>
+                  <td colspan="6" class="empty">正在加载…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <details class="cost-rates">
+            <summary>参考单价与计算方式</summary>
+            <p class="hint">
+              单位：美元 / 百万
+              token，不保证与最新官方报价一致。普通输入不含缓存；输出已含推理
+              token。长上下文单价按单次输入量判断，与月累计用量无关。
+            </p>
+            <div
+              class="table-wrap"
+              role="region"
+              aria-label="模型参考单价"
+              tabindex="0"
+            >
+              <table class="cost-table">
+                <thead>
+                  <tr>
+                    <th scope="col">模型 / 适用范围</th>
+                    <th scope="col">普通输入</th>
+                    <th scope="col">缓存读取</th>
+                    <th scope="col">缓存写入</th>
+                    <th scope="col">输出</th>
+                  </tr>
+                </thead>
+                <tbody id="cost-rate-rows">
+                  <tr>
+                    <td colspan="5" class="empty">正在加载…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </section>
+      </details>
+      <footer>账号额度以服务方记录为准。</footer>
+    </main>
+    <script src="/ui/usage.js"></script>
+  </body>
+</html>

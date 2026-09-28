@@ -8,7 +8,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 
-from request_headers import responses_replay_affinity_value
+from responses_affinity import responses_replay_affinity_value
 
 
 _MAX_LINEAGE_STATES = 256
@@ -47,9 +47,8 @@ def lineage_key_for_body(
     subagent: str | None = None,
 ) -> str | None:
     """Return the stable request lineage used to persist upstream item ids."""
-    effective_subagent = (
-        _normalized_non_empty_string(subagent)
-        or _header_value(headers, "x-openai-subagent")
+    effective_subagent = _normalized_non_empty_string(subagent) or _header_value(
+        headers, "x-openai-subagent"
     )
     if isinstance(body, dict):
         for key in ("prompt_cache_key", "promptCacheKey"):
@@ -227,7 +226,9 @@ class ReplayIdState:
                 if not item_id:
                     fingerprint = _assistant_message_fingerprint(item)
                     if fingerprint is not None:
-                        assistant_ordinals[fingerprint] = assistant_ordinals.get(fingerprint, 0) + 1
+                        assistant_ordinals[fingerprint] = (
+                            assistant_ordinals.get(fingerprint, 0) + 1
+                        )
                     continue
 
                 item_type = str(item.get("type", "")).lower()
@@ -284,15 +285,6 @@ class ReplayIdState:
                 self._assistant_observed_item_fingerprints.add(observed_key)
                 self._remember_assistant_message_id_locked(fingerprint, item_id)
 
-    def observe_response_payload(self, payload: dict | None) -> None:
-        if not isinstance(payload, dict):
-            return
-        output = payload.get("output")
-        if isinstance(output, list):
-            for item in output:
-                if isinstance(item, dict):
-                    self.observe_output_item(item)
-
     def _repair_item_id_locked(
         self,
         item: dict,
@@ -317,7 +309,9 @@ class ReplayIdState:
             return None
         ordinal = assistant_ordinals.get(fingerprint, 0)
         assistant_ordinals[fingerprint] = ordinal + 1
-        return self._assistant_message_item_ids.get(self._assistant_key(fingerprint, ordinal))
+        return self._assistant_message_item_ids.get(
+            self._assistant_key(fingerprint, ordinal)
+        )
 
     def repair_missing_replay_ids(self, body: dict) -> tuple[dict, dict | None]:
         if not isinstance(body, dict):
@@ -349,7 +343,9 @@ class ReplayIdState:
                             item = {**item, "id": canonical_id}
                             item_id = canonical_id
                             item_type_label = item_type or "unknown"
-                            repaired_counts[item_type_label] = repaired_counts.get(item_type_label, 0) + 1
+                            repaired_counts[item_type_label] = (
+                                repaired_counts.get(item_type_label, 0) + 1
+                            )
                             changed = True
                         self._remember_function_id_locked(call_id)
                         repaired_items.append(item)
@@ -357,7 +353,9 @@ class ReplayIdState:
                 if item_id:
                     fingerprint = _assistant_message_fingerprint(item)
                     if fingerprint is not None:
-                        assistant_ordinals[fingerprint] = assistant_ordinals.get(fingerprint, 0) + 1
+                        assistant_ordinals[fingerprint] = (
+                            assistant_ordinals.get(fingerprint, 0) + 1
+                        )
                     repaired_items.append(item)
                     continue
 
@@ -426,6 +424,8 @@ def repair_missing_replay_ids(
         return body, None
     repaired_body, trace = state.repair_missing_replay_ids(body)
     if isinstance(trace, dict):
-        trace["lineage_key_kind"] = lineage_key.split(":", 1)[0] if lineage_key else None
+        trace["lineage_key_kind"] = (
+            lineage_key.split(":", 1)[0] if lineage_key else None
+        )
         trace["lineage_key_sha256"] = _sha256_text(lineage_key) if lineage_key else None
     return repaired_body, trace

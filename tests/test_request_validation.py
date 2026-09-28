@@ -16,8 +16,15 @@ def request_with_body(body, encoding=""):
     async def receive():
         return {"type": "http.request", "body": body, "more_body": False}
 
-    return Request({"type": "http", "method": "POST", "path": "/v1/responses",
-                    "headers": [(b"content-encoding", encoding.encode())]}, receive)
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [(b"content-encoding", encoding.encode())],
+        },
+        receive,
+    )
 
 
 class RequestValidationTests(unittest.IsolatedAsyncioTestCase):
@@ -26,11 +33,18 @@ class RequestValidationTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.ASGITransport(app=proxy.app, raise_app_exceptions=False),
             base_url="http://127.0.0.1",
         ) as client:
-            for path in ("/v1/responses", "/v1/images/generations", "/api/config/client-proxy/settings"):
+            for path in (
+                "/v1/responses",
+                "/v1/images/generations",
+                "/api/config/client-proxy/settings",
+            ):
                 for value in ([], [1], "text", 42, False, None):
                     with self.subTest(path=path, value=value):
-                        response = await client.post(path, content=json.dumps(value),
-                                                     headers={"Content-Type": "application/json"})
+                        response = await client.post(
+                            path,
+                            content=json.dumps(value),
+                            headers={"Content-Type": "application/json"},
+                        )
                         self.assertEqual(response.status_code, 400)
                         self.assertIn("JSON object", response.text)
 
@@ -39,7 +53,9 @@ class RequestValidationTests(unittest.IsolatedAsyncioTestCase):
         diagnostics = []
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(HTTPException) as raised:
-            await util.parse_json_request(request_with_body(private), diagnostics.append)
+            await util.parse_json_request(
+                request_with_body(private), diagnostics.append
+            )
         self.assertEqual(raised.exception.status_code, 400)
         rendered = output.getvalue() + json.dumps(diagnostics)
         self.assertNotIn("DO-NOT-LOG-THIS", rendered)
@@ -51,7 +67,14 @@ class RequestValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_supported_compressed_json_objects_still_decode(self):
         value = {"input": "hello"}
         raw = json.dumps(value).encode()
-        for encoding, body in (("", raw), ("gzip", gzip.compress(raw)),
-                               ("deflate", zlib.compress(raw)), ("zstd", util.zstd_compress(raw))):
+        for encoding, body in (
+            ("", raw),
+            ("gzip", gzip.compress(raw)),
+            ("deflate", zlib.compress(raw)),
+            ("zstd", util.zstd_compress(raw)),
+        ):
             with self.subTest(encoding=encoding):
-                self.assertEqual(await util.parse_json_request(request_with_body(body, encoding)), value)
+                self.assertEqual(
+                    await util.parse_json_request(request_with_body(body, encoding)),
+                    value,
+                )

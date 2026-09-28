@@ -11,9 +11,16 @@ class ApiCostEstimateTests(unittest.TestCase):
     end = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
     def event(self, model="gpt-5.6-sol-excel", **overrides):
-        return {"resolved_model": model, "finished_at": "2026-09-25T12:00:00Z",
-                "usage": {"input_tokens": 1000000, "input_tokens_details": {"cached_tokens": 800000},
-                          "output_tokens": 100000}, **overrides}
+        return {
+            "resolved_model": model,
+            "finished_at": "2026-09-25T12:00:00Z",
+            "usage": {
+                "input_tokens": 1000000,
+                "input_tokens_details": {"cached_tokens": 800000},
+                "output_tokens": 100000,
+            },
+            **overrides,
+        }
 
     def estimate(self, *events):
         return _build_api_cost_estimate(events, self.start, self.end)
@@ -38,14 +45,19 @@ class ApiCostEstimateTests(unittest.TestCase):
         result = self.estimate(self.event(), self.event("unknown-excel"))
         self.assertEqual(result["unpriced_requests"], 1)
         self.assertFalse(result["complete"])
-        unknown = next(row for row in result["models"] if row["model"] == "unknown-excel")
+        unknown = next(
+            row for row in result["models"] if row["model"] == "unknown-excel"
+        )
         self.assertIsNone(unknown["cost_usd"])
         self.assertIsNone(unknown["rates"])
         self.assertAlmostEqual(result["cost_usd"], 5.24)
 
     def test_only_current_month_is_included(self):
-        result = self.estimate(self.event(), self.event(finished_at="2026-08-31T23:59:59Z"),
-                               self.event(finished_at="2026-10-01T00:00:00Z"))
+        result = self.estimate(
+            self.event(),
+            self.event(finished_at="2026-08-31T23:59:59Z"),
+            self.event(finished_at="2026-10-01T00:00:00Z"),
+        )
         self.assertEqual(result["request_count"], 1)
 
     def test_empty_usage_is_zero_but_missing_usage_is_not_free(self):
@@ -56,13 +68,57 @@ class ApiCostEstimateTests(unittest.TestCase):
         self.assertEqual(missing["missing_usage_requests"], 1)
         self.assertFalse(missing["complete"])
 
+    def test_failed_requests_without_usage_are_not_pricing_samples(self):
+        for status in (401, 429, 499, 502, 504, 599):
+            for usage in (None, {}):
+                with self.subTest(status=status, usage=usage):
+                    result = self.estimate(
+                        self.event(),
+                        self.event("unknown-excel", status_code=status, usage=usage),
+                    )
+                    self.assertEqual(result["request_count"], 1)
+                    self.assertEqual(result["priced_requests"], 1)
+                    self.assertEqual(result["unpriced_requests"], 0)
+                    self.assertEqual(result["missing_usage_requests"], 0)
+                    self.assertEqual(len(result["models"]), 1)
+                    self.assertTrue(result["complete"])
+                    self.assertAlmostEqual(result["cost_usd"], 5.24)
+
+    def test_failed_requests_with_recorded_usage_still_contribute_cost(self):
+        result = self.estimate(self.event(), self.event(status_code=499))
+        self.assertEqual(result["request_count"], 2)
+        self.assertEqual(result["priced_requests"], 2)
+        self.assertAlmostEqual(result["cost_usd"], 10.48)
+
+    def test_explicit_zero_usage_is_a_sample_even_when_request_failed(self):
+        result = self.estimate(
+            self.event(status_code=502, usage={"input_tokens": 0, "output_tokens": 0})
+        )
+        self.assertEqual(result["request_count"], 1)
+        self.assertEqual(result["priced_requests"], 1)
+        self.assertEqual(result["cost_usd"], 0)
+
+    def test_success_without_usage_still_reports_missing_measurement(self):
+        result = self.estimate(self.event(status_code=200, usage=None))
+        self.assertEqual(result["request_count"], 1)
+        self.assertEqual(result["missing_usage_requests"], 1)
+        self.assertFalse(result["complete"])
+        self.assertIsNone(result["cost_usd"])
+
     def test_cache_writes_and_reasoning_are_not_double_counted(self):
-        event = self.event(usage={"input_tokens": 1000, "fresh_input_tokens": 800,
-                                 "cached_input_tokens": 200, "cache_creation_input_tokens": 300,
-                                 "output_tokens": 100, "reasoning_output_tokens": 80})
+        event = self.event(
+            usage={
+                "input_tokens": 1000,
+                "fresh_input_tokens": 800,
+                "cached_input_tokens": 200,
+                "cache_creation_input_tokens": 300,
+                "output_tokens": 100,
+                "reasoning_output_tokens": 80,
+            }
+        )
         result = self.estimate(event)
-        self.assertAlmostEqual(result["cost_usd"], .00558)
-        self.assertAlmostEqual(result["cost_breakdown"]["cache_creation"], .0015)
+        self.assertAlmostEqual(result["cost_usd"], 0.00558)
+        self.assertAlmostEqual(result["cost_breakdown"]["cache_creation"], 0.0015)
 
 
 if __name__ == "__main__":

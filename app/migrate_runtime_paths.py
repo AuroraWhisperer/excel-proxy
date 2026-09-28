@@ -55,7 +55,12 @@ def migrate_legacy_runtime_files() -> list[tuple[str, str]]:
                 (".ghcp_proxy-cache-v2.sqlite3", SQLITE_CACHE_FILE),
                 (".ghcp_proxy-cache-v2.sqlite3-wal", f"{SQLITE_CACHE_FILE}-wal"),
                 (".ghcp_proxy-cache-v2.sqlite3-shm", f"{SQLITE_CACHE_FILE}-shm"),
-                (".ghcp_proxy-cache.sqlite3", os.path.join(os.path.dirname(SQLITE_CACHE_FILE), ".ghcp_proxy-cache.sqlite3")),
+                (
+                    ".ghcp_proxy-cache.sqlite3",
+                    os.path.join(
+                        os.path.dirname(SQLITE_CACHE_FILE), ".ghcp_proxy-cache.sqlite3"
+                    ),
+                ),
             ]
         )
 

@@ -22,7 +22,12 @@ _CACHE_SIZE = 256
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024
 MAX_IMAGES = 20
-_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
 
 
 def _validated_images(items: list) -> dict[tuple[int, int], tuple[str, bytes]]:
@@ -51,19 +56,29 @@ def _validated_images(items: list) -> dict[tuple[int, int], tuple[str, bytes]]:
                 continue
             header, separator, encoded = url.partition(",")
             media_type = header[5:].removesuffix(";base64")
-            if not separator or not header.endswith(";base64") or media_type not in _EXTENSIONS:
-                raise ValueError("Excel inline images must be PNG, JPEG, GIF, or WebP base64 data URLs.")
+            if (
+                not separator
+                or not header.endswith(";base64")
+                or media_type not in _EXTENSIONS
+            ):
+                raise ValueError(
+                    "Excel inline images must be PNG, JPEG, GIF, or WebP base64 data URLs."
+                )
             if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4:
                 raise ValueError("Each Excel image must be at most 20 MiB.")
             try:
                 data = base64.b64decode(encoded, validate=True)
             except (binascii.Error, ValueError) as exc:
-                raise ValueError("Excel image input contains invalid base64 data.") from exc
+                raise ValueError(
+                    "Excel image input contains invalid base64 data."
+                ) from exc
             if not data or len(data) > MAX_IMAGE_BYTES:
                 raise ValueError("Each Excel image must contain 1 byte to 20 MiB.")
             total_bytes += len(data)
             if total_bytes > MAX_TOTAL_IMAGE_BYTES:
-                raise ValueError("Inline Excel images must total at most 32 MiB per request.")
+                raise ValueError(
+                    "Inline Excel images must total at most 32 MiB per request."
+                )
             decoded[item_index, part_index] = (media_type, data)
     return decoded
 
@@ -77,7 +92,9 @@ class ExcelImageUploads:
         for key in keys:
             self._file_ids.pop(key, None)
 
-    async def _file_id(self, key, client, headers, media_type, data) -> tuple[str, bool]:
+    async def _file_id(
+        self, key, client, headers, media_type, data
+    ) -> tuple[str, bool]:
         lock, users = self._locks.get(key, (asyncio.Lock(), 0))
         self._locks[key] = (lock, users + 1)
         try:
@@ -99,20 +116,28 @@ class ExcelImageUploads:
                 del self._locks[key]
 
     async def rewrite(
-        self, body: dict, client: httpx.AsyncClient, headers: dict,
+        self,
+        body: dict,
+        client: httpx.AsyncClient,
+        headers: dict,
     ) -> tuple[dict, set[tuple[str, str]]]:
         """Return an upstream body and cache keys eligible for one stale-file retry."""
         items = body.get("input")
         if not isinstance(items, list):
             return body, set()
         decoded = _validated_images(items)
-        account = headers.get("chatgpt-account-id") or headers.get("x-openai-account-id", "")
+        account = headers.get("chatgpt-account-id") or headers.get(
+            "x-openai-account-id", ""
+        )
         reused: set[tuple[str, str]] = set()
         uploaded: set[tuple[str, str]] = set()
         rewritten = []
         for item_index, item in enumerate(items):
-            if (not isinstance(item, dict) or item.get("type") not in (None, "message", "agent_message")
-                    or not isinstance(item.get("content"), list)):
+            if (
+                not isinstance(item, dict)
+                or item.get("type") not in (None, "message", "agent_message")
+                or not isinstance(item.get("content"), list)
+            ):
                 rewritten.append(item)
                 continue
             parts = []
@@ -126,12 +151,16 @@ class ExcelImageUploads:
                 key = (account, digest)
                 # Same-account copies of one image share an upload; unrelated
                 # pictures and text requests do not wait for it.
-                file_id, cached = await self._file_id(key, client, headers, media_type, data)
+                file_id, cached = await self._file_id(
+                    key, client, headers, media_type, data
+                )
                 if not cached:
                     uploaded.add(key)
                 elif key not in uploaded:
                     reused.add(key)
-                picture = {name: value for name, value in part.items() if name != "image_url"}
+                picture = {
+                    name: value for name, value in part.items() if name != "image_url"
+                }
                 picture.setdefault("detail", "auto")
                 parts.append({**picture, "file_id": file_id})
             rewritten.append({**item, "content": parts})
@@ -140,21 +169,26 @@ class ExcelImageUploads:
 
 async def _upload(client, headers, media_type, data, digest) -> str:
     upload_headers = {
-        key: value for key, value in headers.items()
+        key: value
+        for key, value in headers.items()
         if key.lower() not in {"accept", "content-type", "content-length"}
     }
     upload_headers["accept"] = "application/json"
     filename = f"picture-{digest[:12]}.{_EXTENSIONS.get(media_type, 'png')}"
     response = await client.post(
-        ATTACHMENTS_URL, headers=upload_headers,
+        ATTACHMENTS_URL,
+        headers=upload_headers,
         files={"file": (filename, data, media_type)},
-        timeout=httpx.Timeout(120.0, connect=30.0), follow_redirects=False,
+        timeout=httpx.Timeout(120.0, connect=30.0),
+        follow_redirects=False,
     )
     response.raise_for_status()
     try:
         payload = response.json()
     except ValueError as exc:
-        raise httpx.RemoteProtocolError("Excel attachment upload returned invalid JSON.") from exc
+        raise httpx.RemoteProtocolError(
+            "Excel attachment upload returned invalid JSON."
+        ) from exc
     file_id = payload.get("openai_file_id") if isinstance(payload, dict) else None
     if not isinstance(file_id, str) or not file_id.strip():
         raise httpx.RemoteProtocolError("Excel attachment upload returned no file ID.")

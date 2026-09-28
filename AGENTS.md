@@ -1,8 +1,12 @@
 # Repository Notes
 
+## User Environment
+
+The user does not have a mobile client.
+
 ## Repository Ownership
 
-This is the independent private repository `AuroraWhisperer/excel-proxy`.
+This is the independent repository `AuroraWhisperer/excel-proxy`.
 Use only its `origin` remote for normal fetches and pushes. Its Git history
 starts with the current Excel-only application snapshot.
 
@@ -33,10 +37,10 @@ project dependencies such as `pytest`, `httpx`, or `fastapi` installed.
 Run the selected offline regressions through the repository virtualenv:
 
 ```sh
-./.venv/bin/python -B tools/test-proxy-contracts.py
+./.venv/bin/python -B tools/run-offline-tests.py
 ```
 
-On Windows, use `./.venv/Scripts/python.exe -B tools/test-proxy-contracts.py`.
+On Windows, use `./.venv/Scripts/python.exe -B tools/run-offline-tests.py`.
 Optional unittest module/class/method names select a focused run. The runner
 isolates config, state and cache directories and blocks real httpx transports.
 Use syntax checks and targeted manual verification for changes outside this

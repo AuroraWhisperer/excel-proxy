@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Excel Proxy</title>
+    <link rel="stylesheet" href="/ui/shared.css" />
+    <script src="/ui/account-login.js" defer></script>
+  </head>
+  <body class="connection-page">
+    <main>
+      <nav class="page-nav" aria-label="页面导航">
+        <a href="/ui" aria-current="page">连接与设置</a
+        ><a href="/ui/requests">最近请求</a><a href="/ui/usage">用量与费用</a>
+      </nav>
+      <p id="page-error" class="error" role="alert" hidden></p>
+      <p
+        id="navigation-error"
+        class="error"
+        role="alert"
+        tabindex="-1"
+        hidden
+      ></p>
+      <div class="connection-workspace">
+        <section
+          class="setup-panel direct-connection"
+          aria-labelledby="session-heading"
+        >
+          <div class="session-title">
+            <h2 id="session-heading">Excel 代理</h2>
+            <span id="session-status" class="status" role="status"
+              >正在读取…</span
+            >
+          </div>
+          <p id="session-copy" class="session-copy muted">
+            登录后会测试连接，并自动配置 Codex。
+          </p>
+          <div class="toolbar">
+            <button id="login-proxy" class="primary" disabled>
+              登录并启用代理</button
+            ><button id="auto-login-proxy" disabled>账号密码登录</button
+            ><button id="cancel-proxy-login" hidden>取消登录</button>
+          </div>
+          <p class="hint">
+            登录和切换时会测试连接，消耗少量额度；失败不会切换账号。
+          </p>
+          <p id="proxy-feedback" class="feedback" role="status"></p>
+          <div id="account-switcher" class="account-switcher" hidden>
+            <div class="field">
+              <label for="proxy-account"
+                >已保存账号 <span id="account-count"></span></label
+              ><select id="proxy-account"></select>
+            </div>
+            <button id="activate-account" disabled>使用此账号</button>
+          </div>
+          <details id="account-management" class="account-management" hidden>
+            <summary>管理账号</summary>
+            <p class="hint">移除仅清除本机保存的登录信息，不会注销账号。</p>
+            <button id="remove-proxy-account" disabled>移除所选账号</button>
+          </details>
+        </section>
+        <section
+          class="codex-connection codex-overview"
+          aria-labelledby="codex-heading"
+        >
+          <div class="session-title">
+            <h2 id="codex-heading">Codex 接入</h2>
+            <p id="codex-status" class="status" role="status">正在检查配置…</p>
+          </div>
+          <p class="hint">
+            原配置会自动备份。首次接入或更换接入方式后，请重启 Codex。
+          </p>
+          <div class="endpoint">
+            <span>API 地址</span><code>http://127.0.0.1:8000/v1</code>
+          </div>
+        </section>
+      </div>
+      <details class="settings" id="advanced-settings">
+        <summary>高级设置</summary>
+        <div class="connection-layout advanced-connection">
+          <section aria-labelledby="legacy-heading">
+            <h2 id="legacy-heading">使用 Excel 登录</h2>
+            <p class="hint">读取 Excel 加载项的登录信息，替换当前代理登录。</p>
+            <div class="toolbar">
+              <button id="read-session">读取 Excel 登录</button
+              ><button id="clear-session" disabled>清除缓存</button>
+            </div>
+            <p id="session-feedback" class="feedback" role="status"></p>
+            <div class="codex-connection">
+              <h2>Codex 配置</h2>
+              <div class="actions">
+                <button id="enable-codex" disabled>启用接入</button
+                ><button id="disable-codex" disabled>恢复原配置</button>
+              </div>
+            </div>
+          </section>
+          <section class="test-panel" aria-labelledby="test-heading">
+            <h2 id="test-heading">连接测试</h2>
+            <div class="field">
+              <label for="test-model">测试模型</label
+              ><select id="test-model" disabled>
+                <option>正在加载模型…</option>
+              </select>
+            </div>
+            <button id="test-connection" disabled>测试连接</button>
+            <p class="hint">测试会消耗少量额度。</p>
+            <p id="test-feedback" class="feedback" role="status"></p>
+          </section>
+        </div>
+        <div class="setting-row">
+          <div>
+            <label for="revert-setting">关闭代理时恢复原配置</label>
+            <p>下次启动代理时重新接入。</p>
+          </div>
+          <input id="revert-setting" type="checkbox" disabled />
+        </div>
+        <div class="setting-row">
+          <div>
+            <label for="debug-setting">记录请求全文</label>
+            <p>用于排查问题，可能包含敏感信息。默认关闭。</p>
+          </div>
+          <input id="debug-setting" type="checkbox" disabled />
+        </div>
+        <div class="setting-row">
+          <div>
+            <strong>开机启动</strong>
+            <p id="startup-status">正在检查…</p>
+          </div>
+          <button id="toggle-startup" disabled>启用</button>
+        </div>
+        <div class="setting-row">
+          <div>
+            <strong>终端快捷命令</strong>
+            <p id="commands-status">正在检查…</p>
+          </div>
+          <button id="toggle-commands" disabled>安装命令</button>
+        </div>
+      </details>
+      <p id="settings-feedback" class="feedback" role="status"></p>
+      <footer>登录信息加密保存在本机。</footer>
+    </main>
+    <script src="/ui/api.js"></script>
+    <script src="/ui/connection.js"></script>
+  </body>
+</html>

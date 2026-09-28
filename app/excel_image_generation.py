@@ -53,10 +53,16 @@ def prepare_request(body, *, edit=False):
     for index, image in enumerate(images):
         url = image.get("image_url") if isinstance(image, dict) else None
         if not isinstance(url, str) or not url.startswith("data:"):
-            raise ValueError("Edit images must be inline base64 data URLs, not remote URLs.")
+            raise ValueError(
+                "Edit images must be inline base64 data URLs, not remote URLs."
+            )
         header, separator, encoded = url.partition(",")
         media_type = header[5:].removesuffix(";base64")
-        if not separator or not header.endswith(";base64") or media_type not in _EXTENSIONS:
+        if (
+            not separator
+            or not header.endswith(";base64")
+            or media_type not in _EXTENSIONS
+        ):
             raise ValueError("Edit images must be PNG, JPEG, or WebP base64 data URLs.")
         if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4:
             raise ValueError("Each edit image must be at most 20 MiB.")
@@ -66,12 +72,21 @@ def prepare_request(body, *, edit=False):
             raise ValueError("Edit image contains invalid base64 data.") from exc
         if not data or len(data) > MAX_IMAGE_BYTES:
             raise ValueError("Each edit image must contain 1 byte to 20 MiB.")
-        files.append((field_name, (f"image-{index + 1}.{_EXTENSIONS[media_type]}", data, media_type)))
+        files.append(
+            (
+                field_name,
+                (f"image-{index + 1}.{_EXTENSIONS[media_type]}", data, media_type),
+            )
+        )
     return {"data": {key: str(value) for key, value in fields.items()}, "files": files}
 
 
 def validate_response(payload):
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or not payload["data"]:
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("data"), list)
+        or not payload["data"]
+    ):
         raise ValueError("Excel returned no generated images.")
     for image in payload["data"]:
         encoded = image.get("b64_json") if isinstance(image, dict) else None

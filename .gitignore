@@ -5,6 +5,7 @@ __pycache__/
 .ghcp_proxy-cache.sqlite3
 .ghcp_proxy-cache*
 .tmp/
+/tmp/
 .live-proxy*
 .playwright-mcp/
 .pytest_cache/

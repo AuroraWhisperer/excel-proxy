@@ -122,7 +122,7 @@ class MacLocalStorageCaptureTests(unittest.TestCase):
                 )
             self.assertTrue(status["configured"])
             self.assertTrue(status["expired"])
-            with mock.patch("excel_upstream.sys.platform", "darwin"):
+            with mock.patch("excel_session.sys.platform", "darwin"):
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "Refresh the ChatGPT Excel task pane",
@@ -158,8 +158,18 @@ class WindowsLocalStorageCacheTests(unittest.TestCase):
     def test_profile_discovery_skips_browser_cache_subtrees(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            older = root / "nested" / "profile" / "EBWebView" / "Default" / "Local Storage" / "leveldb"
-            newer = root / "another" / "EBWebView" / "Default" / "Local Storage" / "leveldb"
+            older = (
+                root
+                / "nested"
+                / "profile"
+                / "EBWebView"
+                / "Default"
+                / "Local Storage"
+                / "leveldb"
+            )
+            newer = (
+                root / "another" / "EBWebView" / "Default" / "Local Storage" / "leveldb"
+            )
             for path in (older, newer):
                 path.mkdir(parents=True)
             os.utime(older, (1000, 1000))

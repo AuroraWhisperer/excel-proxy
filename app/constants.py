@@ -16,27 +16,36 @@ UPSTREAM_REQUESTS_PER_WINDOW = 5
 UPSTREAM_REQUEST_WINDOW_SECONDS = 1.0
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 
-CONFIG_DIR        = user_config_dir()
-TOKEN_DIR         = user_state_dir()
-CACHE_DIR         = user_cache_dir()
+CONFIG_DIR = user_config_dir()
+TOKEN_DIR = user_state_dir()
+CACHE_DIR = user_cache_dir()
 CLIENT_PROXY_SETTINGS_FILE = os.path.join(CONFIG_DIR, "client-proxy.json")
-USAGE_LOG_FILE    = os.path.join(TOKEN_DIR, "usage-log.jsonl")
+USAGE_LOG_FILE = os.path.join(TOKEN_DIR, "usage-log.jsonl")
 REQUEST_ERROR_LOG_FILE = os.path.join(TOKEN_DIR, "request-errors.log")
 REQUEST_TRACE_LOG_FILE = os.path.join(TOKEN_DIR, "request-trace.jsonl")
 REQUEST_PROMPT_ARCHIVE_DIR = os.path.join(TOKEN_DIR, "request-prompts")
 PROXY_PID_FILE = os.path.join(TOKEN_DIR, "ghcp-proxy.pid")
 PROXY_STDOUT_LOG_FILE = os.path.join(TOKEN_DIR, "ghcp-proxy.stdout.log")
 PROXY_STDERR_LOG_FILE = os.path.join(TOKEN_DIR, "ghcp-proxy.stderr.log")
-PROXY_BASE_URL    = "http://127.0.0.1:8000"
+PROXY_BASE_URL = "http://127.0.0.1:8000"
 CODEX_PROXY_BASE_URL = f"{PROXY_BASE_URL}/v1"
-DASHBOARD_FILE    = os.path.join(os.path.dirname(__file__), "static", "dashboard.html")
-SQLITE_CACHE_FILE = os.path.join(
-    os.path.expanduser(os.environ.get("GHCP_CACHE_DB_PATH", os.path.join(CACHE_DIR, ".ghcp_proxy-cache-v2.sqlite3")))
+CONNECTION_PAGE_FILE = os.path.join(
+    os.path.dirname(__file__), "static", "connection.html"
 )
-CODEX_CONFIG_DIR    = os.path.expanduser("~/.codex")
+SQLITE_CACHE_FILE = os.path.join(
+    os.path.expanduser(
+        os.environ.get(
+            "GHCP_CACHE_DB_PATH",
+            os.path.join(CACHE_DIR, ".ghcp_proxy-cache-v2.sqlite3"),
+        )
+    )
+)
+CODEX_CONFIG_DIR = os.path.expanduser("~/.codex")
 CODEX_PRIMARY_CONFIG_FILE = os.path.join(CODEX_CONFIG_DIR, "config.toml")
 CODEX_MANAGED_CONFIG_FILE = os.path.join(CODEX_CONFIG_DIR, "managed_config.toml")
-CODEX_PROXY_MODEL_CATALOG_FILE = os.path.join(CODEX_CONFIG_DIR, "ghcp-proxy-models.json")
+CODEX_PROXY_MODEL_CATALOG_FILE = os.path.join(
+    CODEX_CONFIG_DIR, "ghcp-proxy-models.json"
+)
 # Codex presents the usable window at 95% of this raw prompt limit; 272k
 # therefore reports as the expected ~258k before auto compaction.
 CODEX_PROXY_MODEL_CONTEXT_WINDOW = 272000

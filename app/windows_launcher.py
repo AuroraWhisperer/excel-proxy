@@ -31,16 +31,30 @@ from constants import (
 REPO_DIR = Path(__file__).resolve().parents[1]
 DASHBOARD_URL = f"{PROXY_BASE_URL}/ui"
 _OPENER = build_opener(ProxyHandler({}))
-_STATE_ID = hashlib.sha256(os.path.normcase(os.path.abspath(PROXY_PID_FILE)).encode()).hexdigest()[:24]
+_STATE_ID = hashlib.sha256(
+    os.path.normcase(os.path.abspath(PROXY_PID_FILE)).encode()
+).hexdigest()[:24]
 _OBJECT_PREFIX = f"Local\\ExcelProxy-{_STATE_ID}"
 
 if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     for name, arguments, result in (
-        ("CreateMutexW", [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
+        (
+            "CreateMutexW",
+            [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR],
+            wintypes.HANDLE,
+        ),
         ("ReleaseMutex", [wintypes.HANDLE], wintypes.BOOL),
-        ("CreateEventW", [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
-        ("OpenEventW", [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
+        (
+            "CreateEventW",
+            [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR],
+            wintypes.HANDLE,
+        ),
+        (
+            "OpenEventW",
+            [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR],
+            wintypes.HANDLE,
+        ),
         ("SetEvent", [wintypes.HANDLE], wintypes.BOOL),
         ("WaitForSingleObject", [wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
         ("CloseHandle", [wintypes.HANDLE], wintypes.BOOL),
@@ -62,7 +76,9 @@ def _handle(value):
 
 @contextmanager
 def _launch_lock():
-    with _handle(_kernel32.CreateMutexW(None, False, f"{_OBJECT_PREFIX}-launch")) as handle:
+    with _handle(
+        _kernel32.CreateMutexW(None, False, f"{_OBJECT_PREFIX}-launch")
+    ) as handle:
         if _kernel32.WaitForSingleObject(handle, 30000) not in (0, 0x80):
             raise RuntimeError("另一个启动或停止操作尚未完成，请稍后重试。")
         try:
@@ -74,8 +90,14 @@ def _launch_lock():
 @contextmanager
 def _desktop_instance():
     """Keep one window owner; subsequent launches activate its window."""
-    with _handle(_kernel32.CreateMutexW(None, False, f"{_OBJECT_PREFIX}-desktop")) as mutex, \
-         _handle(_kernel32.CreateEventW(None, False, False, f"{_OBJECT_PREFIX}-activate")) as activate:
+    with (
+        _handle(
+            _kernel32.CreateMutexW(None, False, f"{_OBJECT_PREFIX}-desktop")
+        ) as mutex,
+        _handle(
+            _kernel32.CreateEventW(None, False, False, f"{_OBJECT_PREFIX}-activate")
+        ) as activate,
+    ):
         status = _kernel32.WaitForSingleObject(mutex, 0)
         if status == 0x102:  # WAIT_TIMEOUT: another process owns the window.
             if not _kernel32.SetEvent(activate):
@@ -93,7 +115,10 @@ def _desktop_instance():
 @contextmanager
 def shutdown_listener(server):
     """Keep a local stop event alive until Uvicorn has finished shutting down."""
-    with _handle(_kernel32.CreateEventW(None, True, False, f"{_OBJECT_PREFIX}-stop")) as handle:
+    with _handle(
+        _kernel32.CreateEventW(None, True, False, f"{_OBJECT_PREFIX}-stop")
+    ) as handle:
+
         def wait_for_stop():
             if _kernel32.WaitForSingleObject(handle, 0xFFFFFFFF) == 0:
                 server.should_exit = True
@@ -108,7 +133,9 @@ def shutdown_listener(server):
 
 
 def _request_stop():
-    with _handle(_kernel32.OpenEventW(0x0002, False, f"{_OBJECT_PREFIX}-stop")) as handle:
+    with _handle(
+        _kernel32.OpenEventW(0x0002, False, f"{_OBJECT_PREFIX}-stop")
+    ) as handle:
         if not _kernel32.SetEvent(handle):
             raise ctypes.WinError(ctypes.get_last_error())
 
@@ -125,16 +152,28 @@ def proxy_running() -> bool:
     except (ConnectionRefusedError, TimeoutError):
         return False
     try:
-        with _OPENER.open(f"{PROXY_BASE_URL}/api/config/background-proxy", timeout=5) as response:
+        with _OPENER.open(
+            f"{PROXY_BASE_URL}/api/config/background-proxy", timeout=5
+        ) as response:
             payload = json.load(response)
-            if response.status == 200 and isinstance(payload, dict) and payload.get("pid_file") == PROXY_PID_FILE:
+            if (
+                response.status == 200
+                and isinstance(payload, dict)
+                and payload.get("pid_file") == PROXY_PID_FILE
+            ):
                 return True
     except URLError as exc:
-        if not isinstance(exc, HTTPError) and isinstance(exc.reason, ConnectionRefusedError):
+        if not isinstance(exc, HTTPError) and isinstance(
+            exc.reason, ConnectionRefusedError
+        ):
             return False
-        raise RuntimeError("无法确认 8000 端口上的服务是本项目的代理，请检查端口占用。") from exc
+        raise RuntimeError(
+            "无法确认 8000 端口上的服务是本项目的代理，请检查端口占用。"
+        ) from exc
     except (ValueError, TimeoutError) as exc:
-        raise RuntimeError("8000 端口上的服务没有返回有效的代理状态，请稍后重试。") from exc
+        raise RuntimeError(
+            "8000 端口上的服务没有返回有效的代理状态，请稍后重试。"
+        ) from exc
     raise RuntimeError("8000 端口已被其他服务或使用不同数据目录的代理占用。")
 
 
@@ -143,9 +182,16 @@ def start_proxy() -> None:
         if proxy_running():
             return
         Path(PROXY_STDOUT_LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-        with open(PROXY_STDOUT_LOG_FILE, "ab") as stdout, open(PROXY_STDERR_LOG_FILE, "ab") as stderr:
+        with (
+            open(PROXY_STDOUT_LOG_FILE, "ab") as stdout,
+            open(PROXY_STDERR_LOG_FILE, "ab") as stderr,
+        ):
             process = subprocess.Popen(
-                [str(REPO_DIR / ".venv" / "Scripts" / "python.exe"), "-B", str(REPO_DIR / "app" / "proxy.py")],
+                [
+                    str(REPO_DIR / ".venv" / "Scripts" / "python.exe"),
+                    "-B",
+                    str(REPO_DIR / "app" / "proxy.py"),
+                ],
                 cwd=REPO_DIR,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
@@ -187,7 +233,10 @@ def stop_proxy() -> None:
 
 def _watch_activation(window, activate, closed: Event) -> None:
     while not closed.wait(0.1):
-        if _kernel32.WaitForSingleObject(activate, 0) == 0 and window.events.shown.is_set():
+        if (
+            _kernel32.WaitForSingleObject(activate, 0) == 0
+            and window.events.shown.is_set()
+        ):
             try:
                 window.restore()
                 window.show()
@@ -210,16 +259,25 @@ def open_dashboard() -> None:
                 if response.status != 200:
                     raise RuntimeError("代理已启动，但仪表盘暂时无法打开。")
             window = webview.create_window(
-                "Excel Proxy", DASHBOARD_URL, width=1120, height=820,
-                min_size=(780, 600), background_color="#0a0d10",
+                "Excel Proxy",
+                DASHBOARD_URL,
+                width=1280,
+                height=720,
+                min_size=(780, 600),
+                background_color="#f4f6f2",
             )
             window.events.closed += closed.set
             activation_thread = Thread(
-                target=_watch_activation, args=(window, activate, closed),
-                name="desktop-activate", daemon=True,
+                target=_watch_activation,
+                args=(window, activate, closed),
+                name="desktop-activate",
+                daemon=True,
             )
             activation_thread.start()
-            webview.start(gui="edgechromium", storage_path=str(Path(CACHE_DIR) / "desktop-webview"))
+            webview.start(
+                gui="edgechromium",
+                storage_path=str(Path(CACHE_DIR) / "desktop-webview"),
+            )
         finally:
             closed.set()
             if activation_thread is not None:
@@ -248,7 +306,9 @@ def main() -> int:
                 traceback.print_exc(file=log)
         except OSError:
             pass
-        ctypes.windll.user32.MessageBoxW(None, f"{exc}\n\n错误日志：{PROXY_STDERR_LOG_FILE}", "Excel Proxy", 0x10)
+        ctypes.windll.user32.MessageBoxW(
+            None, f"{exc}\n\n错误日志：{PROXY_STDERR_LOG_FILE}", "Excel Proxy", 0x10
+        )
         return 1
 
 

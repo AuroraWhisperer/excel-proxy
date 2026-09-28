@@ -6,7 +6,9 @@ import excel_image_generation
 import test_excel_contracts
 
 
-PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+)
 DATA_URL = "data:image/png;base64," + base64.b64encode(PNG).decode()
 
 
@@ -15,19 +17,29 @@ class ExcelImageGenerationTests(unittest.IsolatedAsyncioTestCase):
 
     def success(self):
         self.upstream_status = 200
-        self.upstream_body = {"created": 123, "data": [{"b64_json": base64.b64encode(PNG).decode()}]}
+        self.upstream_body = {
+            "created": 123,
+            "data": [{"b64_json": base64.b64encode(PNG).decode()}],
+        }
 
     async def test_generation_aliases_use_session_not_client_credentials(self):
         self.success()
         for path in ("/images/generations", "/v1/images/generations"):
-            result = await self.local.post(path, json={"prompt": "A blue square", "n": 1},
-                                           headers={"authorization": "Bearer CLIENT_PRIVATE",
-                                                    "x-openai-actor-authorization": "not-a-session"})
+            result = await self.local.post(
+                path,
+                json={"prompt": "A blue square", "n": 1},
+                headers={
+                    "authorization": "Bearer CLIENT_PRIVATE",
+                    "x-openai-actor-authorization": "not-a-session",
+                },
+            )
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json(), self.upstream_body)
             upstream = self.requests[-1]
             self.assertEqual(str(upstream.url), excel_image_generation.GENERATIONS_URL)
-            self.assertEqual(upstream.headers["authorization"], "Bearer KNOWN_CREDENTIAL")
+            self.assertEqual(
+                upstream.headers["authorization"], "Bearer KNOWN_CREDENTIAL"
+            )
             self.assertNotIn("x-openai-actor-authorization", upstream.headers)
             self.assertEqual(json.loads(upstream.content)["model"], "gpt-image-2")
 
@@ -35,36 +47,57 @@ class ExcelImageGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.success()
         for path in ("/images/edits", "/v1/images/edits"):
             for count in (1, 2):
-                result = await self.local.post(path, json={"prompt": "Make it red",
-                    "images": [{"image_url": DATA_URL}] * count})
+                result = await self.local.post(
+                    path,
+                    json={
+                        "prompt": "Make it red",
+                        "images": [{"image_url": DATA_URL}] * count,
+                    },
+                )
                 self.assertEqual(result.status_code, 200, result.text)
                 upstream = self.requests[-1]
                 self.assertEqual(str(upstream.url), excel_image_generation.EDITS_URL)
-                self.assertIn("multipart/form-data; boundary=", upstream.headers["content-type"])
+                self.assertIn(
+                    "multipart/form-data; boundary=", upstream.headers["content-type"]
+                )
                 self.assertIn(PNG, upstream.content)
                 field = b'name="image"' if count == 1 else b'name="image[]"'
                 self.assertEqual(upstream.content.count(field), count)
 
     async def test_non_json_edit_is_rejected_with_instructions(self):
-        result = await self.local.post("/v1/images/edits", data={"prompt": "Red square"},
-                                       files={"image": ("test.png", PNG, "image/png")})
+        result = await self.local.post(
+            "/v1/images/edits",
+            data={"prompt": "Red square"},
+            files={"image": ("test.png", PNG, "image/png")},
+        )
         self.assertEqual(result.status_code, 415)
         self.assertIn("JSON", result.text)
         self.assertFalse(self.requests)
 
     async def test_invalid_requests_never_reach_upstream(self):
-        cases = [{}, {"prompt": 3}, {"prompt": "x", "n": True},
-                 {"prompt": "x", "n": 4}, {"prompt": "x", "size": "bad"},
-                 {"prompt": "x", "model": "other"}, {"prompt": "x", "stream": True},
-                 {"prompt": "x", "output_format": "jpeg"},
-                 {"prompt": "x", "background": "transparent"}]
+        cases = [
+            {},
+            {"prompt": 3},
+            {"prompt": "x", "n": True},
+            {"prompt": "x", "n": 4},
+            {"prompt": "x", "size": "bad"},
+            {"prompt": "x", "model": "other"},
+            {"prompt": "x", "stream": True},
+            {"prompt": "x", "output_format": "jpeg"},
+            {"prompt": "x", "background": "transparent"},
+        ]
         for body in cases:
             with self.subTest(body=body):
                 result = await self.local.post("/images/generations", json=body)
                 self.assertEqual(result.status_code, 400, result.text)
-        for images in ([], [{"image_url": "https://example.com/picture.png"}],
-                       [{"image_url": "data:image/png;base64,@@@"}]):
-            result = await self.local.post("/images/edits", json={"prompt": "x", "images": images})
+        for images in (
+            [],
+            [{"image_url": "https://example.com/picture.png"}],
+            [{"image_url": "data:image/png;base64,@@@"}],
+        ):
+            result = await self.local.post(
+                "/images/edits", json={"prompt": "x", "images": images}
+            )
             self.assertEqual(result.status_code, 400, result.text)
         self.assertFalse(self.requests)
 

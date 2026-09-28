@@ -175,7 +175,9 @@ class BackgroundProxyManager:
 
     def startup_path(self) -> str:
         if self.platform == "win32":
-            appdata = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
+            appdata = os.environ.get("APPDATA") or os.path.expanduser(
+                "~\\AppData\\Roaming"
+            )
             return os.path.join(
                 appdata,
                 "Microsoft",
@@ -216,10 +218,16 @@ class BackgroundProxyManager:
 
     def enable_startup(self) -> dict[str, object]:
         if not self.startup_supported():
-            raise RuntimeError("background startup is only supported on Windows and macOS")
+            raise RuntimeError(
+                "background startup is only supported on Windows and macOS"
+            )
         path = self.startup_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        content = self._windows_startup_cmd() if self.platform == "win32" else self._macos_launch_agent()
+        content = (
+            self._windows_startup_cmd()
+            if self.platform == "win32"
+            else self._macos_launch_agent()
+        )
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
         return self.status_payload()
@@ -232,8 +240,14 @@ class BackgroundProxyManager:
 
     def install_shell_commands(self) -> dict[str, object]:
         if not self.shell_commands_supported():
-            raise RuntimeError("shell commands are only supported on PowerShell for Windows and zsh on macOS")
-        block = self._powershell_profile_block() if self.platform == "win32" else self._zsh_profile_block()
+            raise RuntimeError(
+                "shell commands are only supported on PowerShell for Windows and zsh on macOS"
+            )
+        block = (
+            self._powershell_profile_block()
+            if self.platform == "win32"
+            else self._zsh_profile_block()
+        )
         for path in self.shell_profile_paths():
             _replace_profile_block(path, block)
         return self.status_payload()
@@ -246,7 +260,9 @@ class BackgroundProxyManager:
     def _windows_startup_cmd(self) -> str:
         pythonw = os.path.join(os.path.dirname(self.python_executable), "pythonw.exe")
         launcher = os.path.join(self.repo_dir, "app", "windows_launcher.py")
-        return f'@echo off\nchcp 65001 >nul\nstart "" "{pythonw}" -B "{launcher}" start\n'
+        return (
+            f'@echo off\nchcp 65001 >nul\nstart "" "{pythonw}" -B "{launcher}" start\n'
+        )
 
     def _macos_launch_agent(self) -> str:
         os.makedirs(TOKEN_DIR, exist_ok=True)
@@ -259,9 +275,7 @@ class BackgroundProxyManager:
                 env_lines.append(f"    <string>{_quote_xml(proxy_env[key])}</string>")
             env_xml = (
                 "  <key>EnvironmentVariables</key>\n"
-                "  <dict>\n"
-                + "\n".join(env_lines)
-                + "\n"
+                "  <dict>\n" + "\n".join(env_lines) + "\n"
                 "  </dict>\n"
             )
         return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -288,7 +302,9 @@ class BackgroundProxyManager:
 """
 
     def _powershell_profile_block(self) -> str:
-        python = _quote_ps(os.path.join(os.path.dirname(self.python_executable), "pythonw.exe"))
+        python = _quote_ps(
+            os.path.join(os.path.dirname(self.python_executable), "pythonw.exe")
+        )
         launcher = os.path.join(self.repo_dir, "app", "windows_launcher.py")
         start_args = _quote_ps(f'-B "{launcher}" start')
         stop_args = _quote_ps(f'-B "{launcher}" stop')

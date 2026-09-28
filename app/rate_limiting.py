@@ -56,9 +56,7 @@ async def _call_with_transient_retry(call):
             await asyncio.sleep(_TRANSIENT_UPSTREAM_RETRY_DELAY_SECONDS)
 
 
-async def throttled_client_post(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    return await _call_with_transient_retry(lambda: client.post(url, **kwargs))
-
-
-async def throttled_client_send(client: httpx.AsyncClient, request: httpx.Request, **kwargs) -> httpx.Response:
+async def throttled_client_send(
+    client: httpx.AsyncClient, request: httpx.Request, **kwargs
+) -> httpx.Response:
     return await _call_with_transient_retry(lambda: client.send(request, **kwargs))

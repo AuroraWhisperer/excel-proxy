@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import proxy
+import request_diagnostics
 import util
 
 
@@ -25,28 +26,102 @@ class RequestPromptArchiveTests(unittest.TestCase):
         self._temp_dir.cleanup()
 
     def test_truncated_preview_does_not_destroy_upstream_prefix_fingerprints(self):
-        body = {"model": "gpt-test", "input": [
-            {"type": "message", "role": "developer", "content": "Stable " * 2000},
-            {"type": "function_call", "call_id": "call", "name": "inspect", "arguments": "{}"},
-            {"type": "function_call_output", "call_id": "call", "output": "late result"},
-        ]}
-        request = SimpleNamespace(url=SimpleNamespace(path="/v1/responses"), method="POST")
-        with patch.object(proxy, "_build_debug_detail_snapshot", return_value={}), \
-             patch.object(proxy, "_register_debug_detail_snapshot", return_value=({"enabled": True}, [])), \
-             patch.object(proxy, "_prompt_trace_value", side_effect=lambda value: value), \
-             patch.object(proxy, "_dump_outbound_request_body"), \
-             patch.object(proxy, "_append_request_trace") as append:
+        body = {
+            "model": "gpt-test",
+            "input": [
+                {"type": "message", "role": "developer", "content": "Stable " * 2000},
+                {
+                    "type": "function_call",
+                    "call_id": "call",
+                    "name": "inspect",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call",
+                    "output": "late result",
+                },
+            ],
+        }
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/v1/responses"), method="POST", headers={}
+        )
+        with (
+            patch.object(proxy, "_debug_prompt_logging_enabled", return_value=True),
+            patch.object(proxy, "_prompt_trace_value", side_effect=lambda value: value),
+            patch.object(proxy, "_dump_outbound_request_body"),
+            patch.object(proxy, "_append_request_trace") as append,
+        ):
             proxy._emit_request_trace_start(
-                request_id="synthetic", request=request, upstream_url="https://example.invalid/responses",
-                upstream_path="/responses", requested_model="gpt-test", resolved_model="gpt-test",
-                request_body=body, upstream_body=body, outbound_headers={}, prompt_preview={"user": "fixture"},
+                request_id="synthetic",
+                request=request,
+                upstream_url="https://example.invalid/responses",
+                upstream_path="/responses",
+                requested_model="gpt-test",
+                resolved_model="gpt-test",
+                request_body=body,
+                upstream_body=body,
+                outbound_headers={},
+                prompt_preview={"user": "fixture"},
             )
         row = append.call_args.args[0]
         self.assertTrue(row["upstream_body"]["_truncated"])
         sequence = row["upstream_body_summary"]["input"]["sequence"]
         self.assertEqual(len(sequence), 3)
-        self.assertEqual(sequence[1]["arguments_hash"], proxy._trace_hash("{}"))
-        self.assertEqual(sequence[2]["output_hash"], proxy._trace_hash("late result"))
+        self.assertEqual(
+            sequence[1]["arguments_hash"], request_diagnostics.trace_hash("{}")
+        )
+        self.assertEqual(
+            sequence[2]["output_hash"], request_diagnostics.trace_hash("late result")
+        )
+
+    def test_trace_prompt_and_body_capture_follow_debug_setting(self):
+        body = {"model": "gpt-test", "input": 'PRIVATE_PROMPT\n原文和 "引号"'}
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/v1/responses"), method="POST", headers={}
+        )
+        for enabled in (False, True):
+            with (
+                self.subTest(enabled=enabled),
+                patch.object(
+                    proxy, "_debug_prompt_logging_enabled", return_value=enabled
+                ),
+                patch.object(proxy, "_dump_outbound_request_body") as dump,
+                patch.object(proxy, "_append_request_trace") as append,
+            ):
+                context = proxy._emit_request_trace_start(
+                    request_id="synthetic",
+                    request=request,
+                    upstream_url="https://example.invalid/responses",
+                    upstream_path="/responses",
+                    requested_model="gpt-test",
+                    resolved_model="gpt-test",
+                    request_body=body,
+                    upstream_body=body,
+                    outbound_headers={},
+                )
+            append.assert_called_once()
+            row = append.call_args.args[0]
+            self.assertEqual(dump.called, enabled)
+            if enabled:
+                self.assertEqual(row["source_body"], body)
+                self.assertEqual(row["upstream_body"], body)
+                self.assertEqual(row["request_prompt"]["user"], body["input"])
+                self.assertEqual(context["request_prompt"], row["request_prompt"])
+                self.assertEqual(
+                    context["debug_detail_capture"],
+                    {
+                        "enabled": True,
+                        "reasons": ["debug_prompt_logging"],
+                        "context_window": 10,
+                        "phase": "current",
+                    },
+                )
+                self.assertEqual(dump.call_args.kwargs["upstream_body"], body)
+            else:
+                self.assertNotIn("PRIVATE_PROMPT", json.dumps(row))
+                self.assertNotIn("request_prompt", context)
+                self.assertNotIn("debug_detail_capture", context)
 
     def test_extract_request_prompt_text_formats_readable_transcript(self):
         body = {
@@ -55,7 +130,9 @@ class RequestPromptArchiveTests(unittest.TestCase):
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Explain the latest error."}],
+                    "content": [
+                        {"type": "input_text", "text": "Explain the latest error."}
+                    ],
                 },
                 {
                     "type": "custom_tool_call",
@@ -77,13 +154,19 @@ class RequestPromptArchiveTests(unittest.TestCase):
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Archive this exact prompt."}],
+                    "content": [
+                        {"type": "input_text", "text": "Archive this exact prompt."}
+                    ],
                 }
             ]
         }
-        proxy._save_request_prompt_record("request/with unsafe chars", "/v1/responses", body)
+        proxy._save_request_prompt_record(
+            "request/with unsafe chars", "/v1/responses", body
+        )
 
-        response = proxy.asyncio.run(proxy.request_prompt_api("request/with unsafe chars"))
+        response = proxy.asyncio.run(
+            proxy.request_prompt_api("request/with unsafe chars")
+        )
         payload = json.loads(response.body)
 
         self.assertTrue(payload["available"])
@@ -97,7 +180,9 @@ class RequestPromptArchiveTests(unittest.TestCase):
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Resolve this client request."}],
+                    "content": [
+                        {"type": "input_text", "text": "Resolve this client request."}
+                    ],
                 }
             ]
         }
@@ -130,3 +215,27 @@ class RequestPromptArchiveTests(unittest.TestCase):
         self.assertIsNotNone(proxy._load_request_prompt_record("keep-me"))
         self.assertIsNone(proxy._load_request_prompt_record("drop-me"))
         self.assertTrue(os.path.exists(unrelated_json))
+
+    def test_automatic_pruning_waits_for_complete_history(self):
+        proxy._save_request_prompt_record(
+            "recent-request", "/v1/responses", {"input": "recent"}
+        )
+        proxy._save_request_prompt_record(
+            "older-request", "/v1/responses", {"input": "older"}
+        )
+        with (
+            patch.object(proxy.usage_tracker.state, "history_loaded", False),
+            patch.object(
+                proxy.usage_tracker,
+                "snapshot_usage_events",
+                return_value=[{"request_id": "recent-request"}],
+            ),
+            patch.object(proxy, "_REQUEST_PROMPT_ACTIVE_IDS", set()),
+            patch.object(proxy, "_REQUEST_PROMPT_LAST_PRUNED_MONOTONIC", 0),
+        ):
+            proxy._prune_request_prompt_archive()
+            self.assertIsNotNone(proxy._load_request_prompt_record("older-request"))
+            proxy.usage_tracker.state.history_loaded = True
+            proxy._prune_request_prompt_archive()
+            self.assertIsNone(proxy._load_request_prompt_record("older-request"))
+            self.assertIsNotNone(proxy._load_request_prompt_record("recent-request"))

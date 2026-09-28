@@ -1,8 +1,9 @@
-# 文档导航
+# Documentation
 
-- [使用说明](使用说明.md)：第一次使用、日常操作和常见问题。
-- [参考项目与改进](参考项目与改进.md)：这次修改的原因、参考链接和致谢。
-- [开发说明](开发说明.md)：目录职责、接口限制、测试和运行参数。
-- [历史归档](archive/README.md)：以前的排查和实施记录，仅供追溯。
+These guides are currently in Chinese. For setup instructions in English, see the [project README](../readme.md).
 
-返回[项目首页](../readme.md)。
+- [User guide](使用说明.md): setup, everyday use, and troubleshooting.
+- [Sign-in and multiple accounts](direct-login.md): direct sign-in, account switching, encrypted storage, and token refresh.
+- [Developer notes](开发说明.md): module responsibilities, API limits, tests, and runtime options.
+- [Account quotas](account-balances.md): account imports, sign-in, quota displays, and reporting periods.
+- [References and changes](参考项目与改进.md): implementation references and acknowledgments.

@@ -32,4 +32,4 @@ jobs:
             repo_python=".venv/bin/python"
           fi
           "$repo_python" -m pip install -r requirements.txt
-          "$repo_python" -B tools/test-proxy-contracts.py
+          "$repo_python" -B tools/run-offline-tests.py

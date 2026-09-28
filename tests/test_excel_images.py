@@ -11,12 +11,17 @@ import excel_images
 
 class ExcelImageUploadTests(unittest.IsolatedAsyncioTestCase):
     def picture(self, data=b"picture", media_type="image/png"):
-        return {"type": "input_image", "image_url":
-                f"data:{media_type};base64,{base64.b64encode(data).decode()}"}
+        return {
+            "type": "input_image",
+            "image_url": f"data:{media_type};base64,{base64.b64encode(data).decode()}",
+        }
 
     async def test_invalid_later_picture_is_rejected_before_any_upload(self):
-        for image in (self.picture(media_type="image/svg+xml"), self.picture(b""),
-                      {"type": "input_image", "image_url": "data:image/png;base64,broken!"}):
+        for image in (
+            self.picture(media_type="image/svg+xml"),
+            self.picture(b""),
+            {"type": "input_image", "image_url": "data:image/png;base64,broken!"},
+        ):
             with self.subTest(image=image):
                 body = copy.deepcopy(self.body)
                 body["input"][0]["content"].append(image)
@@ -28,13 +33,26 @@ class ExcelImageUploadTests(unittest.IsolatedAsyncioTestCase):
         for tool_output in (False, True):
             for images, limits in (
                 ([self.picture(b"1234")], {"MAX_IMAGE_BYTES": 3}),
-                ([self.picture(b"12"), self.picture(b"34")], {"MAX_TOTAL_IMAGE_BYTES": 3}),
+                (
+                    [self.picture(b"12"), self.picture(b"34")],
+                    {"MAX_TOTAL_IMAGE_BYTES": 3},
+                ),
                 ([self.picture(), self.picture()], {"MAX_IMAGES": 1}),
             ):
                 with self.subTest(tool_output=tool_output, limits=limits):
-                    item = ({"type": "function_call_output", "call_id": "call_image", "output": images}
-                            if tool_output else {"role": "user", "content": images})
-                    with patch.multiple(excel_images, create=True, **limits), self.assertRaises(ValueError):
+                    item = (
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_image",
+                            "output": images,
+                        }
+                        if tool_output
+                        else {"role": "user", "content": images}
+                    )
+                    with (
+                        patch.multiple(excel_images, create=True, **limits),
+                        self.assertRaises(ValueError),
+                    ):
                         await self.rewrite(body={"input": [item]})
         self.assertEqual(self.requests, [])
 
@@ -91,22 +109,37 @@ class ExcelImageUploadTests(unittest.IsolatedAsyncioTestCase):
         async def upstream(request):
             self.requests.append(request)
             await asyncio.sleep(0)
-            return httpx.Response(200, json={"openai_file_id": f"file-{len(self.requests)}"})
+            return httpx.Response(
+                200, json={"openai_file_id": f"file-{len(self.requests)}"}
+            )
 
         self.client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
         self.addAsyncCleanup(self.client.aclose)
-        self.body = {"input": [{"role": "user", "content": [
-            {"type": "input_text", "text": "Read the image"},
-            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
-        ]}]}
+        self.body = {
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Read the image"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AAAA",
+                        },
+                    ],
+                }
+            ]
+        }
 
     async def rewrite(self, account="account-a", body=None):
         return await self.uploads.rewrite(
-            body if body is not None else self.body, self.client,
+            body if body is not None else self.body,
+            self.client,
             {"authorization": "Bearer test", "chatgpt-account-id": account},
         )
 
-    async def test_upload_cache_is_account_scoped_and_does_not_mutate_the_original(self):
+    async def test_upload_cache_is_account_scoped_and_does_not_mutate_the_original(
+        self,
+    ):
         original = copy.deepcopy(self.body)
         first, reused = await self.rewrite()
         self.assertFalse(reused)
@@ -117,27 +150,55 @@ class ExcelImageUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first, other)
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(self.body, original)
-        self.assertEqual(first["input"][0]["content"][1], {
-            "type": "input_image", "file_id": "file-1", "detail": "auto",
-        })
+        self.assertEqual(
+            first["input"][0]["content"][1],
+            {
+                "type": "input_image",
+                "file_id": "file-1",
+                "detail": "auto",
+            },
+        )
 
     async def test_inline_tool_images_and_existing_references_are_preserved(self):
         image = self.body["input"][0]["content"][1]
-        body = {"input": [
-            {"type": "function_call_output", "call_id": "call_1", "output": [image]},
-            {"type": "custom_tool_call_output", "call_id": "call_2", "output": [image]},
-            {"type": "message", "role": "user", "content": [
-                {"type": "input_image", "file_id": "file-existing", "detail": "high"},
-                {"type": "input_image", "image_url": "https://example.com/image.png"},
-            ]},
-        ]}
+        body = {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [image],
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_2",
+                    "output": [image],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "file-existing",
+                            "detail": "high",
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.png",
+                        },
+                    ],
+                },
+            ]
+        }
         rewritten, reused = await self.rewrite(body=body)
         self.assertEqual(rewritten, body)
         self.assertEqual(self.requests, [])
         self.assertFalse(reused)
 
     async def test_repeated_picture_in_one_message_is_only_uploaded_once(self):
-        self.body["input"][0]["content"].append(copy.deepcopy(self.body["input"][0]["content"][1]))
+        self.body["input"][0]["content"].append(
+            copy.deepcopy(self.body["input"][0]["content"][1])
+        )
         rewritten, reused = await self.rewrite()
         parts = rewritten["input"][0]["content"]
         self.assertEqual(parts[1], parts[2])
@@ -153,11 +214,15 @@ class ExcelImageUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 3)
 
     async def test_missing_file_id_does_not_cache_a_broken_upload(self):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, json={"filename": "picture.png"}),
-        )) as client:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"filename": "picture.png"}),
+            )
+        ) as client:
             with self.assertRaisesRegex(httpx.RemoteProtocolError, "no file ID"):
-                await self.uploads.rewrite(self.body, client, {"chatgpt-account-id": "account-a"})
+                await self.uploads.rewrite(
+                    self.body, client, {"chatgpt-account-id": "account-a"}
+                )
         await self.rewrite()
         self.assertEqual(len(self.requests), 1)
 

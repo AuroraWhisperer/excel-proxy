@@ -39,13 +39,19 @@ def _usage(finished_event):
 
 def _shortfall(usage, previous_usage):
     try:
-        return usage["input_tokens"] - previous_usage["input_tokens"] - previous_usage["output_tokens"]
+        return (
+            usage["input_tokens"]
+            - previous_usage["input_tokens"]
+            - previous_usage["output_tokens"]
+        )
     except (KeyError, TypeError):
         return ""
 
 
 def compare(events):
-    finished = {r["request_id"]: r for r in events if r.get("event") == "request_finished"}
+    finished = {
+        r["request_id"]: r for r in events if r.get("event") == "request_finished"
+    }
     previous = {}
     previous_usage = {}
     for event in events:
@@ -53,8 +59,13 @@ def compare(events):
             continue
         body = event.get("request_body") or {}
         sequence = body.get("input", {}).get("sequence", [])
-        key = (body.get("prompt_cache_key_fingerprint") or body.get("session_id") or event["request_id"],
-               event.get("resolved_model"), event.get("upstream_path"))
+        key = (
+            body.get("prompt_cache_key_fingerprint")
+            or body.get("session_id")
+            or event["request_id"],
+            event.get("resolved_model"),
+            event.get("upstream_path"),
+        )
         old = previous.get(key)
         old_sequence = old.get("input", {}).get("sequence", []) if old else []
         shared = 0
@@ -65,35 +76,54 @@ def compare(events):
         difference = ""
         if shared < min(len(old_sequence), len(sequence)):
             left, right = old_sequence[shared], sequence[shared]
-            difference = f"input[{shared}]: " + ",".join(sorted(
-                field for field in set(left) | set(right) if left.get(field) != right.get(field)
-            ))
+            difference = f"input[{shared}]: " + ",".join(
+                sorted(
+                    field
+                    for field in set(left) | set(right)
+                    if left.get(field) != right.get(field)
+                )
+            )
         elif old:
-            difference = "append_only" if shared == len(old_sequence) else "input_shortened"
+            difference = (
+                "append_only" if shared == len(old_sequence) else "input_shortened"
+            )
         finished_event = finished.get(event["request_id"], {})
         usage = _usage(finished_event)
-        appended = sequence[len(old_sequence):] if old and difference == "append_only" else []
+        appended = (
+            sequence[len(old_sequence) :] if old and difference == "append_only" else []
+        )
         source = event.get("source_body", {})
         yield {
-            "time": event["time"], "request_id": event["request_id"],
-            "model": event.get("resolved_model"), "conversation_hash": key[0],
+            "time": event["time"],
+            "request_id": event["request_id"],
+            "model": event.get("resolved_model"),
+            "conversation_hash": key[0],
             "representation": "responses_source",
             "trace_body_bytes": source.get("original_bytes", ""),
             "input_tokens": usage.get("input_tokens", ""),
             "cached_tokens": usage.get("cached_input_tokens", ""),
             "cache_write_tokens": usage.get("cache_creation_input_tokens", ""),
-            "input_items": len(sequence), "previous_items": len(old_sequence),
-            "identical_prefix_items": shared, "first_item_difference": difference,
+            "input_items": len(sequence),
+            "previous_items": len(old_sequence),
+            "identical_prefix_items": shared,
+            "first_item_difference": difference,
             "changed_parameters": ",".join(
-                k.removesuffix("_fingerprint") for k, v in body.items()
-                if old and k.endswith("_fingerprint") and k != "body_fingerprint" and old.get(k) != v
+                k.removesuffix("_fingerprint")
+                for k, v in body.items()
+                if old
+                and k.endswith("_fingerprint")
+                and k != "body_fingerprint"
+                and old.get(k) != v
             ),
             "last_input_type": sequence[-1].get("type", "") if sequence else "",
             "last_input_role": sequence[-1].get("role", "") if sequence else "",
             "turn_boundary": any(
-                item.get("type") == "message" and item.get("role") == "user" for item in appended
+                item.get("type") == "message" and item.get("role") == "user"
+                for item in appended
             ),
-            "input_shortfall": _shortfall(usage, previous_usage.get(key)) if old else "",
+            "input_shortfall": _shortfall(usage, previous_usage.get(key))
+            if old
+            else "",
         }
         previous[key] = body
         previous_usage[key] = usage
