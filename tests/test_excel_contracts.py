@@ -736,6 +736,7 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 200)
         self.assertTrue(result.json()["ok"])
         self.assertEqual(result.json()["model"], "gpt-6-astra-excel")
+        self.assertEqual(result.json()["model_display_name"], "6-Astra Excel")
         self.assertEqual(result.json()["request_id"], "upstream-contract")
         self.assertEqual(len(self.requests), 1)
         request = self.requests[0]

@@ -312,12 +312,12 @@ class BackgroundProxyManager:
         return f"""{START_MARKER}
 function Start-GHProxy {{
     Start-Process -WindowStyle Normal -FilePath {python} -ArgumentList {start_args} -WorkingDirectory {repo}
-    Write-Host 'Excel Proxy startup requested at http://127.0.0.1:8000'
+    Write-Host 'Excel connection service startup requested at http://127.0.0.1:8000'
 }}
 
 function Stop-GHProxy {{
     Start-Process -WindowStyle Hidden -FilePath {python} -ArgumentList {stop_args} -WorkingDirectory {repo}
-    Write-Host 'Excel Proxy shutdown requested.'
+    Write-Host 'Excel connection service shutdown requested.'
 }}
 {END_MARKER}"""
 
@@ -331,12 +331,12 @@ function Stop-GHProxy {{
         return f"""{START_MARKER}
 start-ghproxy() {{
   if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "GHCP Proxy is already listening on http://localhost:8000"
+    echo "Excel connection service is already listening on http://localhost:8000"
     return 0
   fi
   mkdir -p "$(dirname {pid_file})"
   (cd {repo} && nohup {python} {script} >> {stdout} 2>> {stderr} &)
-  echo "GHCP Proxy started in the background at http://localhost:8000"
+  echo "Excel connection service started in the background at http://localhost:8000"
 }}
 
 stop-ghproxy() {{
@@ -345,11 +345,11 @@ stop-ghproxy() {{
     proxy_pid="$(cat {pid_file} 2>/dev/null)"
     if [[ -n "$proxy_pid" ]] && kill -0 "$proxy_pid" 2>/dev/null; then
       kill "$proxy_pid"
-      echo "GHCP Proxy stopped."
+      echo "Excel connection service stopped."
       return 0
     fi
   fi
-  echo "No GHCP Proxy pid file/process was found."
+  echo "No Excel connection service pid file/process was found."
 }}
 {END_MARKER}"""
 

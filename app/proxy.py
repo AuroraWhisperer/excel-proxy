@@ -51,6 +51,7 @@ import dashboard as dashboard_module
 from excel_responses import ExcelResponseProcessor
 import excel_image_generation
 import excel_images
+import excel_models
 import excel_session_capture
 import excel_upstream
 import responses_protocol
@@ -415,7 +416,7 @@ def _write_proxy_pid_file() -> None:
             f.write("\n")
     except OSError as exc:
         print(
-            f"Warning: failed to write proxy pid file: {exc}",
+            f"Warning: failed to write service pid file: {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -561,7 +562,7 @@ def restore_client_proxy_configs_on_startup() -> dict[str, object]:
     try:
         result = client_proxy_config_service.restore_proxy_configs_on_startup()
     except Exception as exc:  # pragma: no cover - best effort
-        print(f"client proxy startup restore failed: {exc}", flush=True)
+        print(f"client connection startup restore failed: {exc}", flush=True)
         return {
             "attempted": True,
             "restored": False,
@@ -572,7 +573,7 @@ def restore_client_proxy_configs_on_startup() -> dict[str, object]:
 
     if result.get("attempted"):
         print(
-            f"Client proxy startup restore: {json.dumps(result, default=str)}",
+            f"Client connection startup restore: {json.dumps(result, default=str)}",
             flush=True,
         )
     return result
@@ -593,7 +594,7 @@ def revert_client_proxy_configs_on_shutdown() -> dict[str, object]:
     try:
         result = client_proxy_config_service.revert_proxy_configs_on_shutdown()
     except Exception as exc:  # pragma: no cover - best effort
-        print(f"client proxy shutdown revert failed: {exc}", flush=True)
+        print(f"client connection shutdown revert failed: {exc}", flush=True)
         return {
             "attempted": True,
             "reverted": False,
@@ -604,7 +605,7 @@ def revert_client_proxy_configs_on_shutdown() -> dict[str, object]:
 
     if result.get("attempted"):
         print(
-            f"Client proxy shutdown revert: {json.dumps(result, default=str)}",
+            f"Client connection shutdown revert: {json.dumps(result, default=str)}",
             flush=True,
         )
     return result
@@ -1265,7 +1266,7 @@ async def _selected_excel_headers(*, stream=False):
         )
     if selection["source"] == "none":
         raise account_balances.BalanceError(
-            "未启用代理账号，请在首页登录或选择已保存的账号。", 401
+            "未启用连接账号，请在首页登录或选择已保存的账号。", 401
         )
     for refresh in (
         excel_session_capture.refresh_macos_excel_session,
@@ -1291,6 +1292,7 @@ async def _run_excel_connection_test(
                 "ok": False,
                 "model": model,
                 "category": "busy",
+                "model_display_name": excel_models.model_display_name(model),
                 "message": "An Excel connection test is already running.",
             },
         )
@@ -1322,6 +1324,7 @@ async def _run_excel_connection_test(
                     "ok": False,
                     "model": model,
                     "category": "timeout",
+                    "model_display_name": excel_models.model_display_name(model),
                     "message": "The Excel connection test timed out. Check the connection and try again.",
                 },
             )
@@ -1349,17 +1352,18 @@ async def _run_excel_connection_test(
     if code == "basispoints_model_access_changed":
         category = "access"
     messages = {
-        "authentication": "Refresh the signed-in ChatGPT Excel add-in session and test again.",
+        "authentication": "Refresh the signed-in Excel add-in session and test again.",
         "access": "This Excel account cannot access the selected model or endpoint.",
         "rate_limit": "The Excel endpoint is rate limited. Test again later.",
         "timeout": "The Excel connection test timed out. Check the connection and try again.",
-        "request": "Excel rejected the test request. Check model access and proxy compatibility.",
+        "request": "Excel rejected the test request. Check model access and connection compatibility.",
         "upstream": "The Excel service could not complete the test. Try again later.",
-        "protocol": "Excel did not return a completed text response. Check proxy compatibility.",
+        "protocol": "Excel did not return a completed text response. Check connection compatibility.",
     }
     content = {
         "ok": ok,
         "model": model,
+        "model_display_name": excel_models.model_display_name(model),
         "category": "success" if ok else category,
         "message": "The selected model returned a completed text response."
         if ok
@@ -1557,7 +1561,7 @@ async def _handle_excel_image_request(request: Request, *, edit: bool) -> Respon
         return responses_protocol.openai_error_response(exc.status_code, str(exc))
     except RuntimeError:
         return responses_protocol.openai_error_response(
-            401, "Refresh the signed-in ChatGPT Excel add-in session."
+            401, "Refresh the signed-in Excel add-in session."
         )
     headers = {
         key: value
@@ -1763,8 +1767,8 @@ if __name__ == "__main__":
     Thread(
         target=_prewarm_dashboard_payload, name="dashboard-prewarm", daemon=True
     ).start()
-    print("Starting Excel proxy on http://127.0.0.1:8000 (loopback only)", flush=True)
-    print("  Sign in to the ChatGPT Excel add-in, then open the dashboard.", flush=True)
+    print("Starting Excel connection service on http://127.0.0.1:8000 (loopback only)", flush=True)
+    print("  Sign in to the official Excel add-in, then open the dashboard.", flush=True)
     print("  Responses API: POST /v1/responses", flush=True)
     print("  Compaction:    POST /v1/responses/compact", flush=True)
     _write_proxy_pid_file()

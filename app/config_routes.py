@@ -69,9 +69,9 @@ def create_config_router(
             content={
                 "clients": clients,
                 "message": (
-                    "Proxy enabled for: "
+                    "Connection enabled for: "
                     if action == "enable"
-                    else "Proxy disabled for: "
+                    else "Connection disabled for: "
                 )
                 + (
                     ", ".join(
@@ -107,14 +107,14 @@ def create_config_router(
                 message = "Shell commands removed."
             else:
                 raise HTTPException(
-                    status_code=400, detail="Unsupported background proxy action."
+                    status_code=400, detail="Unsupported background service action."
                 )
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except OSError as exc:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to update background proxy setup: {exc}",
+                detail=f"Failed to update background service setup: {exc}",
             ) from exc
         return JSONResponse(content={**result, "message": message})
 

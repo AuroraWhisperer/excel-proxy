@@ -29,7 +29,7 @@ const diagnoses = {
     '请保留请求 ID，排查服务方返回的数据格式。'
   ],
   timeout: ['请求超时', '操作可能已经执行，请确认结果后再试。'],
-  connection: ['连接失败', '请检查网络和代理。重试前确认请求是否已发送。'],
+  connection: ['连接失败', '请检查网络和服务。重试前确认请求是否已发送。'],
   request_validation: ['请求参数错误', '请检查接口、输入大小和参数格式。'],
   upstream_service: [
     '服务暂不可用',
@@ -92,6 +92,7 @@ function renderRows() {
     [
       row.resolved_model,
       row.requested_model,
+      row.model_display_name,
       row.request_id,
       row.status_code,
       diagnosisText(row)
@@ -111,7 +112,7 @@ function renderRows() {
     const usage = row.usage || {};
     const cells = [
       date(row.started_at),
-      row.resolved_model || row.requested_model || '—',
+      row.model_display_name || '—',
       row.status_code || '处理中',
       number(usage.input_tokens),
       number(
@@ -146,7 +147,7 @@ function renderRows() {
     button.disabled = !row.request_id;
     button.setAttribute(
       'aria-label',
-      `查看 ${row.resolved_model || '模型'} 的请求详情`
+      `查看 ${row.model_display_name || '模型'} 的请求详情`
     );
     button.addEventListener('click', () => showPrompt(row));
     td.append(button);
@@ -160,7 +161,7 @@ function renderRows() {
     td.className = 'empty';
     td.textContent = query
       ? '没有匹配的请求，试试其他筛选条件。'
-      : '暂无请求。启用代理后，在 Codex 中发起对话即可查看。';
+      : '暂无请求。启用连接后，在 Codex 中发起对话即可查看。';
     tr.append(td);
     fragment.append(tr);
   }
@@ -187,12 +188,12 @@ async function refreshAll() {
     jobs.map(async ([path, render]) => render(await api(path)))
   );
   const failures = results.filter(result => result.status === 'rejected');
-  $('live-status').textContent = failures.length ? '更新失败' : '代理运行中';
+  $('live-status').textContent = failures.length ? '更新失败' : '服务运行中';
   $('live-status').className = `status ${failures.length ? 'error' : 'ok'}`;
   if (failures.length) {
     feedback(
       'page-error',
-      `${failures[0].reason.message}。请确认代理正在运行，然后刷新。`,
+      `${failures[0].reason.message}。请确认服务正在运行，然后刷新。`,
       true
     );
     $('page-error').hidden = false;
@@ -219,7 +220,7 @@ async function showPrompt(row) {
         ? JSON.stringify(payload.request_prompt, null, 2)
         : '此请求未记录全文。可在「高级设置」中开启「记录请求全文」，仅对后续请求生效。');
     $('prompt-content').textContent =
-      `状态：${row.status_code || '处理中'}\n模型：${row.resolved_model || row.requested_model}\n\n${text}`;
+      `状态：${row.status_code || '处理中'}\n模型：${row.model_display_name || '—'}\n\n${text}`;
   } catch (error) {
     if (sequence === state.promptRequest)
       $('prompt-content').textContent = error.message;
@@ -242,7 +243,7 @@ document
       });
       if (response.status === 404)
         throw new Error(
-          '此页面需要重启代理才能使用。请等当前请求结束后，关闭代理窗口，再运行「启动.vbs」。'
+          '此页面需要重启服务才能使用。请等当前请求结束后，关闭服务窗口，再运行「启动.vbs」。'
         );
       if (!response.ok)
         throw new Error(
@@ -253,7 +254,7 @@ document
       feedback(
         'navigation-error',
         error.name === 'TimeoutError'
-          ? '页面加载超时，请确认代理正在运行后重试。'
+          ? '页面加载超时，请确认服务正在运行后重试。'
           : error.message,
         true
       );

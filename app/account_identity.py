@@ -57,7 +57,7 @@ def account_email(item, credentials, claims):
 def normalize_account(item):
     if not isinstance(item, dict) or item.get("platform", "openai") != "openai":
         raise BalanceError(
-            "仅支持 OpenAI / ChatGPT 账号 JSON，请移除其他平台的账号后重试。"
+            "仅支持 OpenAI 账号 JSON，请移除其他平台的账号后重试。"
         )
     credentials = item.get("credentials", item.get("tokens", item))
     if not isinstance(credentials, dict):
@@ -68,7 +68,7 @@ def normalize_account(item):
             "账号缺少有效 access_token；只含 refresh_token 或 API Key 的文件不支持余额查询。"
         )
     if token.startswith("sk-"):
-        raise BalanceError("API Key 不支持订阅余额查询，请导入 ChatGPT OAuth 账号。")
+        raise BalanceError("API Key 不支持订阅余额查询，请导入 OpenAI OAuth 账号。")
     claims = token_claims(token)
     auth = claims.get("https://api.openai.com/auth")
     auth = auth if isinstance(auth, dict) else {}

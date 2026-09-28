@@ -87,7 +87,7 @@ class MacLocalStorageCaptureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
                 RuntimeError,
-                "No signed-in ChatGPT Excel session",
+                "No signed-in Excel add-in session",
             ):
                 load_macos_excel_session(Path(directory))
 
@@ -125,7 +125,7 @@ class MacLocalStorageCaptureTests(unittest.TestCase):
             with mock.patch("excel_session.sys.platform", "darwin"):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "Refresh the ChatGPT Excel task pane",
+                    "Refresh the official Excel task pane",
                 ):
                     store.request_headers(stream=False)
 

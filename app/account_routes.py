@@ -349,7 +349,7 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
                             response.status_code,
                             "未获得完整模型回复，请检查网络或在高级设置中更换测试模型。",
                         )
-                        + " 原代理账号保持不变。",
+                        + " 原连接账号保持不变。",
                         response.status_code if response.status_code >= 400 else 502,
                     )
                 state = await asyncio.to_thread(
@@ -359,7 +359,7 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
                 )
             except TimeoutError:
                 return JSONResponse(
-                    {"detail": "验证超时，原代理账号保持不变。请稍后重试。"},
+                    {"detail": "验证超时，原连接账号保持不变。请稍后重试。"},
                     status_code=504,
                 )
             except account_balances.BalanceError as exc:
@@ -379,23 +379,23 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
                     },
                 )
             except account_balances.BalanceError:
-                warnings.append("代理已启用，但余额查询账号未能同步。")
+                warnings.append("服务已启用，但余额查询账号未能同步。")
             try:
                 client = await asyncio.to_thread(
                     dependencies.client_proxy_config_service.enable_target, "codex"
                 )
                 if client.get("error") or not client.get("configured"):
                     warnings.append(
-                        "代理已启用，但 Codex 配置未完成，请在高级设置中重试接入。"
+                        "服务已启用，但 Codex 配置未完成，请在高级设置中重试接入。"
                     )
             except Exception:
                 warnings.append(
-                    "代理已启用，但 Codex 配置未完成，请在高级设置中重试接入。"
+                    "服务已启用，但 Codex 配置未完成，请在高级设置中重试接入。"
                 )
             return JSONResponse(
                 {
                     **state,
-                    "message": "账号验证通过，已启用代理。首次接入请重启 Codex。",
+                    "message": "账号验证通过，已启用连接。首次接入请重启 Codex。",
                     "warnings": warnings,
                 },
                 headers={"Cache-Control": "no-store"},

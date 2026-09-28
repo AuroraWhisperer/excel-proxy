@@ -140,7 +140,7 @@ def _build_upstream_client(
     proxy_aliases = _apply_upstream_proxy_env_aliases()
     if proxy_aliases:
         print(
-            f"Configured upstream proxy environment aliases: {', '.join(proxy_aliases)}",
+            f"Configured upstream network environment aliases: {', '.join(proxy_aliases)}",
             flush=True,
         )
     proxy_configured = _upstream_proxy_configured()
@@ -153,8 +153,8 @@ def _build_upstream_client(
         upstream_http2, upstream_http2_source = http2_override, "client_override"
     if not tls_verify and tls_verify_source == "proxy_default":
         print(
-            "Upstream proxy detected: defaulting GHCP upstream TLS verification off. "
-            "Set GHCP_UPSTREAM_TLS_VERIFY=1 once a trusted proxy CA bundle is configured.",
+            "Upstream network forwarding detected: defaulting GHCP upstream TLS verification off. "
+            "Set GHCP_UPSTREAM_TLS_VERIFY=1 once a trusted network CA bundle is configured.",
             flush=True,
         )
     elif not tls_verify:
@@ -164,7 +164,7 @@ def _build_upstream_client(
         )
     if not upstream_http2 and upstream_http2_source == "proxy_default":
         print(
-            "Upstream proxy detected: defaulting GHCP upstream HTTP/2 off for compatibility.",
+            "Upstream network forwarding detected: defaulting GHCP upstream HTTP/2 off for compatibility.",
             flush=True,
         )
     timeout = httpx.Timeout(configured_upstream_timeout_seconds())

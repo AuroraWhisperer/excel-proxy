@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>Excel Proxy</title>
+    <title>Excel 连接服务</title>
     <link rel="stylesheet" href="/ui/shared.css" />
     <script src="/ui/account-login.js" defer></script>
   </head>
@@ -28,7 +28,7 @@
           aria-labelledby="session-heading"
         >
           <div class="session-title">
-            <h2 id="session-heading">Excel 代理</h2>
+            <h2 id="session-heading">Excel 连接</h2>
             <span id="session-status" class="status" role="status"
               >正在读取…</span
             >
@@ -38,7 +38,7 @@
           </p>
           <div class="toolbar">
             <button id="login-proxy" class="primary" disabled>
-              登录并启用代理</button
+              登录并连接</button
             ><button id="auto-login-proxy" disabled>账号密码登录</button
             ><button id="cancel-proxy-login" hidden>取消登录</button>
           </div>
@@ -81,7 +81,7 @@
         <div class="connection-layout advanced-connection">
           <section aria-labelledby="legacy-heading">
             <h2 id="legacy-heading">使用 Excel 登录</h2>
-            <p class="hint">读取 Excel 加载项的登录信息，替换当前代理登录。</p>
+            <p class="hint">读取 Excel 加载项的登录信息，替换当前登录信息。</p>
             <div class="toolbar">
               <button id="read-session">读取 Excel 登录</button
               ><button id="clear-session" disabled>清除缓存</button>
@@ -110,8 +110,8 @@
         </div>
         <div class="setting-row">
           <div>
-            <label for="revert-setting">关闭代理时恢复原配置</label>
-            <p>下次启动代理时重新接入。</p>
+            <label for="revert-setting">关闭服务时恢复原配置</label>
+            <p>下次启动服务时重新接入。</p>
           </div>
           <input id="revert-setting" type="checkbox" disabled />
         </div>

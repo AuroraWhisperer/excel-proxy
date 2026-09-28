@@ -168,13 +168,13 @@ def proxy_running() -> bool:
         ):
             return False
         raise RuntimeError(
-            "无法确认 8000 端口上的服务是本项目的代理，请检查端口占用。"
+            "无法确认 8000 端口上的服务属于本项目，请检查端口占用。"
         ) from exc
     except (ValueError, TimeoutError) as exc:
         raise RuntimeError(
-            "8000 端口上的服务没有返回有效的代理状态，请稍后重试。"
+            "8000 端口上的服务没有返回有效状态，请稍后重试。"
         ) from exc
-    raise RuntimeError("8000 端口已被其他服务或使用不同数据目录的代理占用。")
+    raise RuntimeError("8000 端口已被其他程序或使用不同数据目录的实例占用。")
 
 
 def start_proxy() -> None:
@@ -202,11 +202,11 @@ def start_proxy() -> None:
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 if process.poll() is not None:
-                    raise RuntimeError("代理启动后退出，请查看错误日志。")
+                    raise RuntimeError("服务启动后退出，请查看错误日志。")
                 if proxy_running():
                     return
                 time.sleep(0.2)
-            raise RuntimeError("代理未能在 30 秒内启动，请查看错误日志。")
+            raise RuntimeError("服务未能在 30 秒内启动，请查看错误日志。")
         except Exception:
             if process.poll() is None:
                 try:
@@ -228,7 +228,7 @@ def stop_proxy() -> None:
             if not Path(PROXY_PID_FILE).exists() and not proxy_running():
                 return
             time.sleep(0.2)
-        raise RuntimeError("代理仍在关闭，请稍后重试并查看错误日志。")
+        raise RuntimeError("服务仍在关闭，请稍后重试并查看错误日志。")
 
 
 def _watch_activation(window, activate, closed: Event) -> None:
@@ -257,9 +257,9 @@ def open_dashboard() -> None:
         try:
             with _OPENER.open(DASHBOARD_URL, timeout=5) as response:
                 if response.status != 200:
-                    raise RuntimeError("代理已启动，但仪表盘暂时无法打开。")
+                    raise RuntimeError("服务已启动，但仪表盘暂时无法打开。")
             window = webview.create_window(
-                "Excel Proxy",
+                "Excel 连接服务",
                 DASHBOARD_URL,
                 width=1280,
                 height=720,
@@ -307,7 +307,7 @@ def main() -> int:
         except OSError:
             pass
         ctypes.windll.user32.MessageBoxW(
-            None, f"{exc}\n\n错误日志：{PROXY_STDERR_LOG_FILE}", "Excel Proxy", 0x10
+            None, f"{exc}\n\n错误日志：{PROXY_STDERR_LOG_FILE}", "Excel 连接服务", 0x10
         )
         return 1
 

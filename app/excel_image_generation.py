@@ -24,7 +24,9 @@ def prepare_request(body, *, edit=False):
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("A nonempty image prompt is required.")
     if body.get("model") not in (None, "gpt-image-2"):
-        raise ValueError("Excel image requests support gpt-image-2 only.")
+        raise ValueError(
+            "Excel image requests support the default image model only; omit the model field."
+        )
     if body.get("output_format") not in (None, "png"):
         raise ValueError("Excel image requests return PNG only.")
     if body.get("response_format") not in (None, "b64_json"):

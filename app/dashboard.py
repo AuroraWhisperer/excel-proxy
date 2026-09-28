@@ -316,6 +316,9 @@ class DashboardService:
         if not isinstance(event, dict):
             return {}
         result = dict(event)
+        result["model_display_name"] = excel_models.model_display_name(
+            _usage_event_model_name(event)
+        )
         if "request_prompt" in result:
             result.pop("request_prompt", None)
             result["request_prompt_available"] = True

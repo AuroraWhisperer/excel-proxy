@@ -252,7 +252,7 @@ class AccountLoginService:
                     nonce = secrets.token_urlsafe(16)
                     body = (
                         f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>账号登录</title>'
-                        f"<h1>账号登录</h1><p>{message}</p><p>请返回 Excel Proxy。</p>"
+                        f"<h1>账号登录</h1><p>{message}</p><p>请返回 Excel 连接服务。</p>"
                         f'<script nonce="{nonce}">history.replaceState(null,"","/auth/complete");</script></html>'
                     ).encode()
                     self.send_response(status)

@@ -84,7 +84,7 @@ class LocalAccessMiddleware:
             response = JSONResponse(
                 {
                     "error": {
-                        "message": "Use the local Excel Proxy dashboard or a client on this computer.",
+                        "message": "Use the local Excel connection dashboard or a client on this computer.",
                         "type": "permission_error",
                         "code": "local_access_required",
                         "param": None,

@@ -118,7 +118,7 @@ class ProxyClientConfigService:
             return status
 
         status["exists"] = True
-        status["status_message"] = "exists but not configured for proxy"
+        status["status_message"] = "exists but not connected to the local service"
 
         try:
             parsed = self._read_codex_managed_config()
@@ -145,14 +145,14 @@ class ProxyClientConfigService:
         active = config_active and catalog_valid
         status["configured"] = bool(active)
         if active:
-            status["status_message"] = "proxy configured"
+            status["status_message"] = "connection configured"
         elif proxy_markers_present and not catalog_valid:
             status["status_message"] = (
                 "managed config present, model catalog missing or invalid"
             )
         elif proxy_markers_present:
             status["status_message"] = (
-                "managed config present, proxy settings incomplete"
+                "managed config present, connection settings incomplete"
             )
         return status
 
@@ -260,7 +260,7 @@ class ProxyClientConfigService:
                         self._backup_config_file(path)
                     self._write_text_atomic(path, updated)
             self.refresh_codex_model_catalog()
-            status["status_message"] = "proxy already enabled"
+            status["status_message"] = "connection already enabled"
             return status
 
         existing_primary_config = ""
@@ -297,7 +297,7 @@ class ProxyClientConfigService:
         )
         status = self.codex_proxy_status()
         status["backup_path"] = primary_backup_path or backup_path
-        status["status_message"] = "installed proxy config"
+        status["status_message"] = "installed connection config"
         return status
 
     def refresh_codex_model_catalog(self) -> bool:
@@ -336,11 +336,11 @@ class ProxyClientConfigService:
         if not managed_targets_proxy and not catalog_exists:
             status["backup_path"] = backup_path
             status["restored_from_backup"] = False
-            status["status_message"] = "proxy already disabled"
+            status["status_message"] = "connection already disabled"
             return status
 
         restored_from_backup = False
-        operation_message = "removed proxy-managed Codex files"
+        operation_message = "removed managed Codex connection files"
         try:
             if primary_backup_path:
                 shutil.copy2(
@@ -367,7 +367,7 @@ class ProxyClientConfigService:
                 self._remove_file_if_exists(self._config.codex_managed_config_file)
             self._remove_file_if_exists(self._config.codex_model_catalog_file)
         except Exception as exc:
-            status["error"] = f"failed to disable proxy config: {exc}"
+            status["error"] = f"failed to disable connection config: {exc}"
             return status
 
         status = self.codex_proxy_status()
@@ -448,7 +448,7 @@ class ProxyClientConfigService:
         reverted = any(
             bool(client.get("restored_from_backup"))
             or client.get("status_message")
-            in {"removed proxy config", "removed proxy-managed Codex files"}
+            in {"removed connection config", "removed managed Codex connection files"}
             for client in clients.values()
             if isinstance(client, dict)
         )
@@ -800,7 +800,7 @@ class ProxyClientConfigService:
                 default=bool(supported_levels),
             )
             supports_verbosity = True
-            pricing_text = "Uses the signed-in ChatGPT Excel session"
+            pricing_text = "Uses the signed-in Excel session"
             description = (
                 f"{provider} · {context_window:,} token context · {pricing_text}."
             )

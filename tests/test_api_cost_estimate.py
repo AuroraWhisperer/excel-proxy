@@ -40,6 +40,13 @@ class ApiCostEstimateTests(unittest.TestCase):
         self.assertAlmostEqual(result["cost_usd"], 5.24 + 3.65)
         self.assertEqual(len(result["models"]), 2)
         self.assertEqual(result["request_count"], 2)
+        self.assertEqual(
+            {row["model"]: row["model_display_name"] for row in result["models"]},
+            {
+                "gpt-5.6-sol-excel": "5.6-Sol Excel",
+                "gpt-5.6-terra-excel": "5.6-Terra Excel",
+            },
+        )
 
     def test_missing_model_price_is_explicit_not_free(self):
         result = self.estimate(self.event(), self.event("unknown-excel"))

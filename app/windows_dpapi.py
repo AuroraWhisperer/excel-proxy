@@ -46,7 +46,7 @@ def _windows_dpapi_transform(data: bytes, *, decrypt: bool) -> bytes:
             ctypes.byref(output_blob),
         )
     else:
-        description = "ghcp_proxy GPT Excel session"
+        description = "Excel session"
         crypt32.CryptProtectData.argtypes = [
             ctypes.POINTER(_DataBlob),
             wintypes.LPCWSTR,

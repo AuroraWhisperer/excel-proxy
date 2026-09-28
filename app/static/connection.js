@@ -64,7 +64,7 @@ function renderAccountControls() {
     ? '等待登录…'
     : rows.length
       ? '添加账号'
-      : '登录并启用代理';
+      : '登录并连接';
   $('login-proxy').disabled = !state.accounts || locked;
   $('auto-login-proxy').disabled = !state.accounts || locked;
   $('cancel-proxy-login').hidden = !state.signingIn;
@@ -103,7 +103,7 @@ async function activateAccount(id) {
   if (!id || state.activating) return;
   state.activating = true;
   renderAccountControls();
-  feedback('proxy-feedback', '正在测试连接，成功后将启用代理并配置 Codex…');
+  feedback('proxy-feedback', '正在测试连接，成功后将启用连接并配置 Codex…');
   try {
     const result = await post(
       `/api/proxy-accounts/${encodeURIComponent(id)}/activate`,
@@ -175,7 +175,7 @@ function renderSettings(payload) {
   const client = payload.clients?.codex;
   if (client) {
     $('codex-status').textContent =
-      client.error || (client.configured ? '已连接 Excel Proxy' : '尚未启用');
+      client.error || (client.configured ? '已连接 Excel 连接服务' : '尚未启用');
     $('codex-status').classList.toggle('error', Boolean(client.error));
     $('enable-codex').disabled = busy.has('enable-codex');
     $('enable-codex').textContent = client.configured
@@ -205,7 +205,7 @@ function renderBackground(payload) {
     ? '当前系统不支持快捷命令'
     : payload.shell_commands_installed
       ? Object.values(payload.commands || {}).join(' / ')
-      : '安装后可从终端启动和停止代理';
+      : '安装后可从终端启动和停止服务';
   $('toggle-commands').textContent = payload.shell_commands_installed
     ? '移除命令'
     : '安装命令';
@@ -229,7 +229,7 @@ async function refreshAll() {
   if (failures.length) {
     feedback(
       'page-error',
-      `${failures[0].reason.message}。请确认代理正在运行，页面会自动重试。`,
+      `${failures[0].reason.message}。请确认服务正在运行，页面会自动重试。`,
       true
     );
     $('page-error').hidden = false;
@@ -268,7 +268,7 @@ document
       });
       if (response.status === 404)
         throw new Error(
-          '此页面需要重启代理才能使用。请等当前请求结束后，关闭代理窗口，再运行「启动.vbs」。'
+          '此页面需要重启服务才能使用。请等当前请求结束后，关闭服务窗口，再运行「启动.vbs」。'
         );
       if (!response.ok)
         throw new Error(
@@ -279,7 +279,7 @@ document
       feedback(
         'navigation-error',
         error.name === 'TimeoutError'
-          ? '页面加载超时，请确认代理正在运行后重试。'
+          ? '页面加载超时，请确认服务正在运行后重试。'
           : error.message,
         true
       );
@@ -341,7 +341,7 @@ $('remove-proxy-account').addEventListener('click', () =>
     if (
       !row ||
       !confirm(
-        `移除「${row.name}」？用量与费用页的同一账号也会移除。${row.active ? '代理将停止使用此账号，不会自动切换。' : ''}这不会注销账号。`
+        `移除「${row.name}」？用量与费用页的同一账号也会移除。${row.active ? '服务将停止使用此账号，不会自动切换。' : ''}这不会注销账号。`
       )
     )
       return '';
@@ -361,7 +361,7 @@ $('read-session').addEventListener('click', () =>
     renderSession(payload);
     return payload.configured && !payload.expired
       ? '已读取 Excel 登录信息。'
-      : '未找到有效登录，请先在 Excel 的 ChatGPT 加载项中登录。';
+      : '未找到有效登录，请先在 Excel 的官方加载项中登录。';
   })
 );
 $('clear-session').addEventListener('click', () =>

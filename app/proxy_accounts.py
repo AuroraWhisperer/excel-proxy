@@ -27,7 +27,7 @@ from windows_dpapi import (
 def _normalize(payload):
     record_id, account = _normalize_account(payload)
     if not account["account_id"]:
-        raise BalanceError("登录缺少 ChatGPT 账号标识，请重新登录。")
+        raise BalanceError("登录缺少账号标识，请重新登录。")
     claims = _claims(account["access_token"])
     auth = claims.get("https://api.openai.com/auth") or {}
     if isinstance(auth, dict) and auth.get("chatgpt_account_id") not in (
@@ -114,7 +114,7 @@ class ProxyAccountStore:
                 BalanceError,
             ):
                 raise BalanceError(
-                    "无法读取已保存的代理账号；不会自动改用其他账号。请检查本机存储权限。",
+                    "无法读取已保存的连接账号；不会自动改用其他账号。请检查本机存储权限。",
                     503,
                 ) from None
         self._loaded = True
@@ -145,7 +145,7 @@ class ProxyAccountStore:
                 os.replace(temporary, self.path)
             except (OSError, RuntimeError):
                 raise BalanceError(
-                    "代理账号未保存：无法加密或写入本机文件。请检查 Windows 用户权限。",
+                    "连接账号未保存：无法加密或写入本机文件。请检查 Windows 用户权限。",
                     503,
                 ) from None
             finally:
@@ -195,7 +195,7 @@ class ProxyAccountStore:
             if key == self._active_id:
                 pending[key] = row
             if len(updated) > MAX_ACCOUNTS:
-                raise BalanceError("最多保存 50 个代理账号，请先移除不再使用的账号。")
+                raise BalanceError("最多保存 50 个连接账号，请先移除不再使用的账号。")
             self._commit(updated, self._active_id, self._source, pending)
             return {**self.snapshot(), "imported_ids": [key]}
 
@@ -231,12 +231,12 @@ class ProxyAccountStore:
                     self._source != "oauth" or self._active_id != record_id
                 ):
                     raise BalanceError(
-                        "代理账号已切换，请重试；不会使用其他账号重发。", 409
+                        "连接账号已切换，请重试；不会使用其他账号重发。", 409
                     )
                 staged = not active and record_id in self._pending
                 original = (self._pending if staged else self._accounts).get(record_id)
                 if original is None:
-                    raise BalanceError("代理账号不存在，请刷新页面。", 404)
+                    raise BalanceError("连接账号不存在，请刷新页面。", 404)
                 row = dict(original)
             if row["needs_login"]:
                 raise BalanceError("此账号授权已失效，请重新登录；不会切换账号。", 401)
@@ -301,12 +301,12 @@ class ProxyAccountStore:
                     )
                 row = replacement
             if row["expires_at"] <= time.time():
-                raise BalanceError("当前代理账号已过期，请重新登录此账号。", 401)
+                raise BalanceError("当前账号已过期，请重新登录此账号。", 401)
             if rejected_authorization is not None:
                 with self._lock:
                     if self._source != "oauth" or self._active_id != record_id:
                         raise BalanceError(
-                            "代理账号在续期期间已切换，请重试；不会使用其他账号重发。",
+                            "连接账号在续期期间已切换，请重试；不会使用其他账号重发。",
                             409,
                         )
         return account_session_headers(row, stream=stream)
@@ -344,7 +344,7 @@ class ProxyAccountStore:
         with self._lock:
             self._load()
             if record_id not in self._accounts:
-                raise BalanceError("代理账号不存在，请刷新页面。", 404)
+                raise BalanceError("连接账号不存在，请刷新页面。", 404)
             active = self._active_id == record_id
             self._commit(
                 {key: row for key, row in self._accounts.items() if key != record_id},

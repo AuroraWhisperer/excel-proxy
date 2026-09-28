@@ -49,7 +49,7 @@ def find_codex_executable() -> str:
                 if candidate.is_file():
                     return str(candidate)
     raise QuotaError(
-        "未找到 Codex CLI。请安装并使用 ChatGPT 账号登录，或设置 CODEX_BIN 后重启代理。"
+        "未找到 Codex CLI。请安装并使用订阅账号登录，或设置 CODEX_BIN 后重启服务。"
     )
 
 
@@ -198,7 +198,7 @@ def read_account_quota() -> dict:
                 continue
             if message.get("error") or not isinstance(message.get("result"), dict):
                 raise QuotaError(
-                    "Codex 额度查询失败，请确认 CLI 已使用 ChatGPT 订阅账号登录并检查网络。"
+                    "Codex 额度查询失败，请确认 CLI 已使用订阅账号登录并检查网络。"
                 )
             return message["result"]
 
@@ -211,7 +211,7 @@ def read_account_quota() -> dict:
         account = request("account/read", {"refreshToken": False}).get("account")
         if not isinstance(account, dict) or account.get("type") != "chatgpt":
             raise QuotaError(
-                "当前 Codex CLI 未使用 ChatGPT 订阅账号登录，无法检测订阅额度。"
+                "当前 Codex CLI 未使用订阅账号登录，无法检测订阅额度。"
             )
         return normalize_quota(
             request("account/rateLimits/read"), account.get("planType")

@@ -34,7 +34,7 @@ def diagnose_failure(
     elif status_code == 401 or code == "excel_auth_required":
         category, action = (
             "authentication",
-            "Sign in again to the selected proxy account, or refresh the selected Excel add-in session.",
+            "Sign in again to the selected connection account, or refresh the selected Excel add-in session.",
         )
     elif status_code == 403 or code in {
         "excel_access_denied",
@@ -94,7 +94,7 @@ def diagnose_failure(
     }:
         category, action = (
             "connection",
-            "Check network and proxy connectivity; only pre-send connection failures are safe to replay.",
+            "Check connectivity to the network and local service; only pre-send connection failures are safe to replay.",
         )
     elif status_code in {400, 404, 405, 413, 415, 422}:
         category, action = (
@@ -152,7 +152,7 @@ def excel_error_payload(status_code: int, payload: Any = None) -> dict:
     code, message = {
         401: (
             "excel_auth_required",
-            "Sign in again to the selected proxy account, or refresh the selected Excel add-in session.",
+            "Sign in again to the selected connection account, or refresh the selected Excel add-in session.",
         ),
         403: (
             "excel_access_denied",

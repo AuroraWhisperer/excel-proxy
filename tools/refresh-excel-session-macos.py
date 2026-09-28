@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manually refresh GHCP Proxy from macOS Excel WebKit LocalStorage."""
+"""Manually refresh Excel connection service from macOS Excel WebKit LocalStorage."""
 
 from __future__ import annotations
 
@@ -34,10 +34,12 @@ def submit_session(session_url: str, headers: dict[str, str]) -> None:
         raise RuntimeError(
             detail
             if isinstance(detail, str) and detail
-            else f"GHCP Proxy returned HTTP {exc.code}"
+            else f"Excel connection service returned HTTP {exc.code}"
         ) from exc
     if not isinstance(payload, dict) or not payload.get("configured"):
-        raise RuntimeError("GHCP Proxy did not accept the stored Excel session")
+        raise RuntimeError(
+            "Excel connection service did not accept the stored Excel session"
+        )
 
 
 def main() -> int:
@@ -54,9 +56,9 @@ def main() -> int:
             load_macos_excel_session(Path(args.website_data).expanduser()),
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        print(f"Could not refresh the ChatGPT Excel session: {exc}", file=sys.stderr)
+        print(f"Could not refresh the Excel add-in session: {exc}", file=sys.stderr)
         return 1
-    print("GPT Excel session refreshed from macOS WebKit LocalStorage.")
+    print("Excel session refreshed from macOS WebKit LocalStorage.")
     return 0
 
 

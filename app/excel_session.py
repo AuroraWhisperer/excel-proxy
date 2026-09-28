@@ -147,7 +147,7 @@ class ExcelSessionStore:
         chatgpt_account = headers.get("chatgpt-account-id")
         openai_account = headers.get("x-openai-account-id")
         if not chatgpt_account and not openai_account:
-            raise ValueError("a ChatGPT account ID header is required")
+            raise ValueError("an account ID header is required")
         if chatgpt_account and openai_account and chatgpt_account != openai_account:
             raise ValueError("captured account ID headers do not match")
         account_id = chatgpt_account or openai_account
@@ -160,7 +160,7 @@ class ExcelSessionStore:
         expires_at = _decode_jwt_exp(authorization)
         now = time.time()
         if expires_at is not None and expires_at <= now and not allow_expired:
-            raise ValueError("the captured ChatGPT bearer token is already expired")
+            raise ValueError("the captured bearer token is already expired")
 
         with self._lock:
             self._headers = headers
@@ -296,18 +296,18 @@ class ExcelSessionStore:
         if not headers:
             if sys.platform == "darwin":
                 raise RuntimeError(
-                    "ChatGPT Excel sign-in was not found. Open the ChatGPT task pane in Excel and sign in."
+                    "Excel add-in sign-in was not found. Open the official task pane in Excel and sign in."
                 )
             raise RuntimeError(
-                "GPT Excel is not configured. Read the cached session from the signed-in Excel add-in, then retry."
+                "Excel is not connected. Read the cached session from the signed-in Excel add-in, then retry."
             )
         if expires_at is not None and expires_at <= time.time():
             if sys.platform == "darwin":
                 raise RuntimeError(
-                    "The ChatGPT Excel token has expired. Refresh the ChatGPT Excel task pane, then retry."
+                    "The Excel add-in token has expired. Refresh the official Excel task pane, then retry."
                 )
             raise RuntimeError(
-                "The GPT Excel session has expired. Refresh the signed-in Excel add-in session, then read it again."
+                "The Excel session has expired. Refresh the signed-in Excel add-in session, then read it again."
             )
         headers.update(
             {
