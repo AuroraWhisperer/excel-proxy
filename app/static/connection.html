@@ -34,23 +34,48 @@
             >
           </div>
           <p id="session-copy" class="session-copy muted">
-            登录后会测试连接，并自动配置 Codex。
+            选择一种方式登录 ChatGPT 账号。
           </p>
-          <div class="toolbar">
-            <button id="login-proxy" class="primary" disabled>
-              登录并连接</button
-            ><button id="auto-login-proxy" disabled>账号密码登录</button
-            ><button id="cancel-proxy-login" hidden>取消登录</button>
+          <div class="login-methods">
+            <div>
+              <button
+                id="login-proxy"
+                class="primary"
+                aria-describedby="browser-login-hint"
+                disabled
+              >浏览器登录</button>
+              <p id="browser-login-hint" class="hint">
+                打开官方页面，手动完成登录。
+              </p>
+            </div>
+            <div>
+              <button
+                id="auto-login-proxy"
+                aria-describedby="credential-login-hint"
+                disabled
+              >账号密码登录</button>
+              <p id="credential-login-hint" class="hint">
+                粘贴邮箱、密码和 2FA 密钥，自动填写登录。
+              </p>
+            </div>
           </div>
+          <button id="cancel-proxy-login" hidden>取消登录</button>
           <p class="hint">
-            登录和切换时会测试连接，消耗少量额度；失败不会切换账号。
+            登录或切换时先测试连接，通过后启用账号并配置 Codex；测试消耗少量额度，失败不会切换账号。
           </p>
           <p id="proxy-feedback" class="feedback" role="status"></p>
           <div id="account-switcher" class="account-switcher" hidden>
             <div class="field">
               <label for="proxy-account"
                 >已保存账号 <span id="account-count"></span></label
-              ><select id="proxy-account"></select>
+              >
+              <div class="account-select">
+                <select id="proxy-account">
+                  <button type="button">
+                    <selectedcontent></selectedcontent>
+                  </button>
+                </select>
+              </div>
             </div>
             <button id="activate-account" disabled>使用此账号</button>
           </div>

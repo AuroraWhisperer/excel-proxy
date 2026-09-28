@@ -39,7 +39,7 @@ function renderSession(payload) {
       ? `当前账号：${payload.account_name}${payload.expired ? '。登录已过期，请重新登录。' : payload.renewable ? '' : '。有效期至 ' + date(payload.expires_at * 1000) + '，到期后请重新登录。'}`
       : ready
         ? '正在使用 Excel 加载项的登录信息。在此登录账号后，无需再打开 Excel。'
-        : '登录后会测试连接，并自动配置 Codex。';
+        : '选择一种方式登录 ChatGPT 账号。';
   $('clear-session').disabled =
     payload.source === 'oauth' ||
     !payload.configured ||
@@ -62,9 +62,7 @@ function renderAccountControls() {
   const locked = state.signingIn || state.activating;
   $('login-proxy').textContent = state.signingIn
     ? '等待登录…'
-    : rows.length
-      ? '添加账号'
-      : '登录并连接';
+    : '浏览器登录';
   $('login-proxy').disabled = !state.accounts || locked;
   $('auto-login-proxy').disabled = !state.accounts || locked;
   $('cancel-proxy-login').hidden = !state.signingIn;
@@ -81,19 +79,28 @@ function renderAccountControls() {
 }
 function renderAccounts(payload) {
   state.accounts = payload;
-  const selected = $('proxy-account').value;
-  $('proxy-account').replaceChildren(
-    ...payload.accounts.map(
-      row =>
-        new Option(
-          `${row.name} · ${row.account_hint}${row.active ? '（当前使用）' : row.expired && !row.renewable ? '（需重新登录）' : ''}`,
-          row.id
-        )
-    )
+  const select = $('proxy-account');
+  const selected = select.value;
+  const options = payload.accounts.map(
+    row =>
+      new Option(
+        `${row.name} · ${row.account_hint}${row.active ? '（当前使用）' : row.expired && !row.renewable ? '（需重新登录）' : ''}`,
+        row.id
+      )
   );
+  // Preserve the open menu's keyboard focus during background refreshes.
+  if (
+    options.length !== select.options.length ||
+    options.some(
+      (option, index) =>
+        option.value !== select.options[index].value ||
+        option.text !== select.options[index].text
+    )
+  )
+    select.replaceChildren(...select.querySelectorAll('button'), ...options);
   if (payload.accounts.some(row => row.id === selected))
-    $('proxy-account').value = selected;
-  else if (payload.active_id) $('proxy-account').value = payload.active_id;
+    select.value = selected;
+  else if (payload.active_id) select.value = payload.active_id;
   $('account-count').textContent = `· ${payload.accounts.length} 个`;
   $('account-switcher').hidden = !payload.accounts.length;
   $('account-management').hidden = !payload.accounts.length;

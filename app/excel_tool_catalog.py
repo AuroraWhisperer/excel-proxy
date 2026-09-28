@@ -90,12 +90,7 @@ def _iter_client_tools(tools: object, namespace: str | None = None):
 def client_tool_types(source: dict) -> dict[str, str]:
     if str(source.get("tool_choice") or "").strip().lower() == "none":
         return {}
-    result: dict[str, str] = {}
-    for key, _name, _namespace, tool_type, _tool in _iter_client_tools(
-        source.get("tools")
-    ):
-        result[key] = tool_type
-    return result
+    return {key: info["type"] for key, info in _client_tool_specs(source).items()}
 
 
 def relay_tool_name(name: str) -> str:
@@ -126,6 +121,20 @@ def _client_tool_specs(source: dict) -> dict[str, dict]:
     for key, name, namespace, tool_type, tool in _iter_client_tools(
         source.get("tools")
     ):
+        if key in result:
+            previous = result[key]
+            same_identity = (previous["name"], previous["namespace"]) == (
+                name,
+                namespace,
+            )
+            same_contract = _tool_definition_signature(
+                previous["spec"]
+            ) == _tool_definition_signature(tool)
+            if not same_identity or not same_contract:
+                raise ValueError(
+                    "Excel client tools contain conflicting duplicate declarations."
+                )
+            continue
         result[key] = {
             "key": key,
             "name": name,
@@ -134,6 +143,25 @@ def _client_tool_specs(source: dict) -> dict[str, dict]:
             "spec": tool,
         }
     return result
+
+
+def _tool_definition_signature(spec: dict) -> str:
+    # Descriptions and lazy-discovery state may change without changing how a
+    # call is decoded. Unknown fields still participate in the contract.
+    definition = {
+        key: value
+        for key, value in spec.items()
+        if key not in {"description", "defer_loading"}
+    }
+    definition["name"] = spec["name"].strip()
+    definition["type"] = str(spec.get("type") or "").strip().lower()
+    if definition["type"] == "function":
+        for key in ("parameters", "inputSchema", "input_schema"):
+            definition.pop(key, None)
+        schema = _tool_input_schema(spec)
+        if schema is not None:
+            definition["parameters"] = schema
+    return json.dumps(definition, sort_keys=True, ensure_ascii=False)
 
 
 def _tool_input_schema(spec: dict):
@@ -171,9 +199,9 @@ def _client_tool_protocol_instructions(source: dict) -> str:
         return EXTERNAL_CLIENT_INSTRUCTIONS
 
     tool_catalog: list[dict[str, object]] = []
-    for key, name, namespace, tool_type, tool in _iter_client_tools(
-        source.get("tools")
-    ):
+    for key, info in _client_tool_specs(source).items():
+        name, namespace = info["name"], info["namespace"]
+        tool_type, tool = info["type"], info["spec"]
         entry: dict[str, object] = {
             "type": tool_type,
             "name": key,

@@ -13,6 +13,9 @@
 * {
   box-sizing: border-box;
 }
+html {
+  scrollbar-gutter: stable;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -114,8 +117,9 @@ header {
   border-bottom: 1px solid var(--line);
 }
 main {
-  width: min(1180px, 100% - 64px);
+  width: min(1600px, 100% - 48px);
   margin: 0 auto;
+  padding: 12px 0 32px;
 }
 .toolbar {
   display: flex;
@@ -123,14 +127,12 @@ main {
   flex-wrap: wrap;
   gap: 10px;
 }
-main {
-  padding: 8px 0 32px;
-}
 .page-nav {
   display: flex;
   gap: 28px;
   border-bottom: 1px solid var(--line);
-  margin-bottom: 28px;
+  margin-bottom: 24px;
+  font-size: 16px;
 }
 .page-nav a {
   color: var(--muted);
@@ -888,6 +890,15 @@ footer {
 .credential-dialog .hint {
   margin: 0;
 }
+@media (max-width: 960px) {
+  main {
+    width: calc(100% - 40px);
+    padding-top: 8px;
+  }
+  .page-nav {
+    margin-bottom: 16px;
+  }
+}
 @media (max-width: 900px) {
   .connection-layout {
     grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
@@ -915,7 +926,6 @@ footer {
   }
   .page-nav {
     gap: 20px;
-    margin-bottom: 24px;
     font-size: 13px;
   }
   .page-nav a {
@@ -960,13 +970,6 @@ footer {
 /* Connection workspace: one shared surface, two related tasks. */
 .connection-page {
   font-size: 16px;
-}
-.connection-page main {
-  width: min(1600px, 100% - 48px);
-  padding-top: 12px;
-}
-.connection-page .page-nav {
-  margin-bottom: 24px;
 }
 .connection-page button,
 .connection-page select {
@@ -1018,6 +1021,17 @@ footer {
 .connection-workspace .hint {
   line-height: 1.7;
 }
+.connection-workspace .login-methods {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.connection-workspace .login-methods .hint {
+  margin-top: 8px;
+}
+.connection-workspace #cancel-proxy-login {
+  margin-top: 12px;
+}
 .connection-workspace .account-switcher {
   max-width: none;
   margin-top: 20px;
@@ -1029,6 +1043,108 @@ footer {
 .connection-workspace .field label {
   margin-bottom: 6px;
   font-size: 14px;
+}
+.account-select {
+  position: relative;
+}
+.account-select::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 18px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+#proxy-account {
+  appearance: none;
+  display: block;
+  padding-right: 44px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+#proxy-account:hover:not(:disabled),
+#proxy-account:open {
+  background: var(--soft);
+  border-color: var(--accent);
+}
+#proxy-account:disabled {
+  cursor: default;
+}
+@supports (appearance: base-select) {
+  #proxy-account,
+  #proxy-account::picker(select) {
+    appearance: base-select;
+  }
+  .account-select::after {
+    display: none;
+  }
+  #proxy-account {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-right: 16px;
+  }
+  #proxy-account > button {
+    display: contents;
+    font: inherit;
+  }
+  #proxy-account selectedcontent {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #proxy-account::picker-icon {
+    content: '';
+    flex: 0 0 8px;
+    height: 8px;
+    margin-left: auto;
+    border-right: 2px solid var(--muted);
+    border-bottom: 2px solid var(--muted);
+    transform: translateY(-2px) rotate(45deg);
+  }
+  #proxy-account:open::picker-icon {
+    transform: translateY(2px) rotate(225deg);
+  }
+  #proxy-account::picker(select) {
+    inline-size: anchor-size(self-inline);
+    max-inline-size: calc(100vw - 48px);
+    max-height: 280px;
+    margin-top: 6px;
+    padding: 6px;
+    border: 1px solid #bdccc2;
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    overflow-y: auto;
+    position-try-order: normal;
+  }
+  #proxy-account option {
+    min-height: 44px;
+    padding: 10px 12px;
+    gap: 10px;
+    border-radius: 4px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  #proxy-account option:checked {
+    color: var(--accent);
+    background: var(--soft);
+    font-weight: 600;
+  }
+  #proxy-account option:hover,
+  #proxy-account option:focus-visible {
+    background: var(--soft);
+    outline-offset: -2px;
+  }
+  #proxy-account option::checkmark {
+    color: var(--accent);
+  }
 }
 .connection-workspace .account-management {
   margin-top: 12px;
@@ -1132,13 +1248,6 @@ footer {
   font-size: 14px;
 }
 @media (max-width: 960px) {
-  .connection-page main {
-    width: calc(100% - 40px);
-    padding-top: 8px;
-  }
-  .connection-page .page-nav {
-    margin-bottom: 16px;
-  }
   .connection-workspace {
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
   }

@@ -70,7 +70,7 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/ui")
         source = await self.page_source(response)
         html = source
-        self.assertIn("登录并连接", html)
+        self.assertIn("浏览器登录", html)
         for marker in (
             'id="proxy-account"',
             'id="activate-account"',
@@ -732,13 +732,13 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("font-size: 14px", rule)
         self.assertIn("font: 14px/1.65", css.split("body {", 1)[1].split("}", 1)[0])
 
-    async def test_connection_page_uses_more_desktop_width_and_retains_narrow_layout(
+    async def test_pages_share_desktop_width_and_retain_narrow_layout(
         self,
     ):
         response = await self.client.get("/ui/shared.css")
         source = await self.page_source(response)
         css = source
-        main = css.split(".connection-page main {", 1)[1].split("}", 1)[0]
+        main = css.split("main {", 1)[1].split("}", 1)[0]
         self.assertIn("width: min(1600px, 100% - 48px)", main)
         narrow = css.split("@media (max-width: 720px) {", 1)[1]
         self.assertIn(

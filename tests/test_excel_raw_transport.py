@@ -611,6 +611,61 @@ class RawRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(recovery["usage"]["total_tokens"], 26)
 
+    async def test_mixed_batch_repair_preserves_valid_sibling_and_replay_ids(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self.requests.clear()
+                good = transport(
+                    {"name": "exec_command", "arguments": {"cmd": "echo sibling"}}
+                )
+                good.update(id="fc_sibling", call_id="call_sibling")
+                corrected = raw_call("exec_command", "cmd", COMMAND)
+                corrected.update(id="fc_corrected", call_id="call_corrected")
+                self.serve([[good, unframed_call(COMMAND)], [corrected]])
+                result = await self.request(stream)
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertEqual(len(self.requests), 2)
+                retry = json.loads(self.requests[1].content)
+                self.assertNotIn("call_sibling", json.dumps(retry))
+                if stream:
+                    events = [
+                        json.loads(line[6:])
+                        for line in result.text.splitlines()
+                        if line.startswith("data: {")
+                    ]
+                    completed = [
+                        event
+                        for event in events
+                        if event["type"] == "response.completed"
+                    ]
+                    self.assertEqual(len(completed), 1)
+                    done = [
+                        event["item"]["call_id"]
+                        for event in events
+                        if event["type"] == "response.output_item.done"
+                    ]
+                    self.assertEqual(done, ["call_sibling", "call_corrected"])
+                    payload = completed[0]["response"]
+                else:
+                    payload = result.json()
+                calls = payload["output"]
+                self.assertEqual(
+                    [call["call_id"] for call in calls],
+                    ["call_sibling", "call_corrected"],
+                )
+                self.assertEqual(
+                    [json.loads(call["arguments"])["cmd"] for call in calls],
+                    ["echo sibling", COMMAND],
+                )
+                self.assertEqual(
+                    excel_upstream.translate_input_items(calls), [good, corrected]
+                )
+                recovery = self.finish.call_args.args[0].trace_context[
+                    "tool_call_recovery"
+                ]
+                self.assertEqual(recovery["outcome"], "succeeded")
+                self.assertEqual(recovery["attempts"], 1)
+
     def test_equivalence_requires_same_target_and_all_metadata(self):
         second = dict(FUNCTION_TOOL, name="other.exec_command")
         source = {"tools": [FUNCTION_TOOL, second]}

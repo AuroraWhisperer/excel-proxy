@@ -35,6 +35,8 @@ class ModelCatalogTests(unittest.TestCase):
             "gpt-5.6-luna-excel": ("gpt-5.6-luna", 200_000, 180_000),
             "gpt-5.6-terra-excel": ("gpt-5.6-terra", 272_000, 240_000),
             "gpt-5.6-sol-excel": ("gpt-5.6-sol", 272_000, 240_000),
+            "gpt-6-sol-excel": ("gpt-6-sol", 272_000, 240_000),
+            "gpt-6-luna-excel": ("gpt-6-luna", 272_000, 240_000),
         }
         self.assertEqual(self.models.MODEL_IDS, tuple(expected))
         self.assertEqual(self.models.MODEL_ID, "gpt-5.6-sol-excel")

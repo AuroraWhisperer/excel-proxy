@@ -25,6 +25,8 @@ API 基础地址为 `http://127.0.0.1:8000/v1`。服务只监听本机，并检�
 | 模型 ID | 推理级别 |
 | --- | --- |
 | `gpt-6-astra-excel` | `medium`、`high`、`xhigh` |
+| `gpt-6-sol-excel` | `low`、`medium`、`high`、`xhigh` |
+| `gpt-6-luna-excel` | `low`、`medium`、`high`、`xhigh` |
 | `gpt-5.6-sol-excel` | `low`、`medium`、`high`、`xhigh` |
 | `gpt-5.6-terra-excel` | `low`、`medium`、`high`、`xhigh` |
 | `gpt-5.6-luna-excel` | `low`、`medium`、`high`、`xhigh` |
@@ -35,6 +37,8 @@ Responses 请求接受省略 `-excel` 的别名。省略模型时使用 `gpt-5.6
 
 - **对话历史：** 每次请求需携带完整历史；`previous_response_id` 和强制工具选择目前返回 400。
 - **工具执行：** 支持客户端声明的 function、custom 和 namespace 工具。本地服务负责转换调用，文件操作和命令执行由客户端完成。
+- **重复工具声明：** 同名工具仅描述或延迟加载标记不同、调用约束相同时保留第一份声明；schema、工具类型、custom 格式等约束冲突时，在请求上游前返回 400，错误参数为 `tools`。
+- **协作历史：** `author/recipient` 转为上下文说明；`agent_message` 转为明确标注来源的普通上下文，保留文本与图片顺序，不赋予其他代理的消息 system/developer 权限。
 - **整批校验：** 一批工具必须全部通过校验才会交给客户端；未知工具、重复 ID 或未完成的调用不会先执行其中的有效部分。设置 `parallel_tool_calls=false` 时，多个调用会被拒绝。
 - **流式回复：** 等待时每 15 秒保活。上游返回普通 JSON 时，会转换为 Responses 事件并向客户端保持 `text/event-stream`；未完成的输出或失败不会作为成功返回。
 - **请求失败：** 不会静默切换账号或模型，开始生成后的传输错误不会自动重放整个请求。同账号的认证续期规则见[直接登录与多账号](direct-login.md#凭据与续期)。
@@ -60,6 +64,8 @@ Responses 请求接受省略 `-excel` 的别名。省略模型时使用 `gpt-5.6
 | 解码后合计大小 | 最多 32 MiB |
 
 消息、工具结果和对话历史中一同提交的图片都计入限制。格式、编码、数量和大小检查全部通过后，才上传消息附件；这些检查不包含图片尺寸或像素内容解码。格式或大小不合适会明确报错，不会丢弃图片后继续回答。
+
+工具结果中的内嵌截图保留原样；`file_id` 或 URL 图片引用转为紧随该结果的图片消息，通过调用 ID 和序号保持对应关系，不作为新用户指令或新回合。
 
 ## 图片生成与编辑
 

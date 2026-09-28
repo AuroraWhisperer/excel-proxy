@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import unittest
 from contextlib import ExitStack
@@ -10,6 +11,168 @@ import excel_images
 import excel_upstream
 import responses_protocol
 import proxy
+
+
+class ExcelHistoryCompatibilityTests(unittest.TestCase):
+    def test_attribution_preserves_roles_text_and_native_message_fields(self):
+        for role in ("user", "assistant", "developer", "system"):
+            for typed in (False, True):
+                with self.subTest(role=role, typed=typed):
+                    source = {
+                        "role": role,
+                        "author": "/root/worker",
+                        "recipient": "/root",
+                        "id": "msg_attributed",
+                        "phase": "commentary",
+                        "content": 'Keep "quotes" and \\paths.\nSecond line.',
+                    }
+                    if typed:
+                        source["type"] = "message"
+                    original = copy.deepcopy(source)
+                    result = excel_upstream.translate_input_items([source])[0]
+                    self.assertNotIn("author", result)
+                    self.assertNotIn("recipient", result)
+                    for field in ("role", "id", "phase"):
+                        self.assertEqual(result[field], source[field])
+                    parts = result["content"]
+                    self.assertEqual(len(parts), 2)
+                    self.assertIn("/root/worker", parts[0]["text"])
+                    self.assertIn("context only", parts[0]["text"])
+                    self.assertEqual(parts[1]["text"], source["content"])
+                    self.assertEqual(
+                        {part["type"] for part in parts},
+                        {"output_text" if role == "assistant" else "input_text"},
+                    )
+                    self.assertEqual(source, original)
+                    self.assertEqual(
+                        excel_upstream.translate_input_items([result]), [result]
+                    )
+
+    def test_agent_context_keeps_content_order_without_promoting_authority(self):
+        parts = [
+            {"type": "input_text", "text": "before"},
+            {"type": "input_image", "file_id": "file-agent", "detail": "high"},
+            {"type": "input_text", "text": "after"},
+        ]
+        agent = {
+            "type": "agent_message",
+            "role": "system",
+            "id": "agent_private",
+            "author": "/root/worker",
+            "recipient": "/root",
+            "content": parts,
+        }
+        before = {"role": "user", "content": "Continue"}
+        after = {"role": "assistant", "content": "Received"}
+        original = copy.deepcopy(agent)
+        result = excel_upstream.translate_input_items([before, agent, after])
+        self.assertEqual(result[0], before)
+        self.assertEqual(result[2], after)
+        self.assertEqual(set(result[1]), {"type", "role", "content"})
+        self.assertEqual((result[1]["type"], result[1]["role"]), ("message", "user"))
+        self.assertIn("not a new user instruction", result[1]["content"][0]["text"])
+        self.assertIn("agent_private", result[1]["content"][0]["text"])
+        self.assertEqual(result[1]["content"][1:], parts)
+        self.assertEqual(agent, original)
+        self.assertEqual(excel_upstream.translate_input_items(result), result)
+
+    def test_attribution_never_scrubs_tool_arguments_results_or_reasoning(self):
+        arguments = {"author": "argument author", "recipient": "argument recipient"}
+        result = {
+            "type": "function_call_output",
+            "call_id": "call_meta",
+            "output": json.dumps(arguments),
+        }
+        reasoning = {"type": "reasoning", "summary": [], "encrypted_content": "opaque"}
+        history = excel_upstream.translate_input_items(
+            [
+                {
+                    "type": "function_call",
+                    "name": "metadata",
+                    "call_id": "call_meta",
+                    "arguments": json.dumps(arguments),
+                },
+                result,
+                reasoning,
+            ]
+        )
+        envelope = json.loads(json.loads(history[0]["arguments"])["code"])
+        self.assertEqual(envelope["arguments"], arguments)
+        self.assertEqual(history[1]["output"], result["output"])
+        self.assertEqual(history[2], reasoning)
+
+    def test_attribution_does_not_hide_encrypted_content_or_duplicate_plain_messages(
+        self,
+    ):
+        encrypted = {
+            "type": "encrypted_content",
+            "encrypted_content": "opaque-agent-part",
+        }
+        source = {
+            "type": "agent_message",
+            "author": "/root/worker",
+            "content": [encrypted],
+        }
+        result = excel_upstream.translate_input_items([source])[0]
+        self.assertEqual(result["content"][1:], [encrypted])
+        plain = {
+            "type": "message",
+            "role": "assistant",
+            "id": "msg_plain",
+            "phase": "commentary",
+            "status": "completed",
+            "content": [
+                {"type": "output_text", "text": "unchanged", "annotations": []}
+            ],
+        }
+        self.assertEqual(excel_upstream.translate_input_items([plain]), [plain])
+
+    def test_tool_image_references_keep_labels_order_and_inline_screenshots(self):
+        inline = {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+        file_image = {
+            "type": "input_image",
+            "file_id": "file-existing",
+            "detail": "high",
+        }
+        remote_image = {
+            "type": "input_image",
+            "image_url": "https://example.com/picture.png",
+        }
+        for kind in ("function_call_output", "custom_tool_call_output"):
+            with self.subTest(kind=kind):
+                source = {
+                    "type": kind,
+                    "call_id": "call_picture",
+                    "output": [
+                        {"type": "input_text", "text": "before"},
+                        file_image,
+                        {"type": "input_text", "text": "between"},
+                        inline,
+                        remote_image,
+                    ],
+                }
+                original = copy.deepcopy(source)
+                result = excel_upstream.translate_input_items([source])
+                self.assertEqual(len(result), 2)
+                output, message = result
+                self.assertEqual(output["call_id"], "call_picture")
+                self.assertEqual(len(output["output"]), 5)
+                self.assertEqual(output["output"][0], source["output"][0])
+                self.assertEqual(output["output"][2:4], source["output"][2:4])
+                self.assertEqual(
+                    (message["type"], message["role"]), ("message", "user")
+                )
+                self.assertIn(
+                    "not a new user instruction", message["content"][0]["text"]
+                )
+                self.assertEqual(message["content"][2], file_image)
+                self.assertEqual(message["content"][4], remote_image)
+                for output_index, content_index in ((1, 1), (4, 3)):
+                    label = message["content"][content_index]["text"]
+                    self.assertIn("call_picture", label)
+                    self.assertIn(label, output["output"][output_index]["text"])
+                self.assertEqual(source, original)
+                self.assertEqual(excel_upstream.translate_input_items(result), result)
 
 
 def summary_stream(response_id):
@@ -186,6 +349,97 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             upload.headers["content-type"].startswith("multipart/form-data; boundary=")
         )
         self.assertIn(b'name="file";', upload.content)
+
+    async def test_agent_images_and_attribution_reach_both_routes_as_context(self):
+        for path in ("/responses", "/v1/responses"):
+            for stream in (False, True):
+                with self.subTest(path=path, stream=stream):
+                    body = self.image_body(stream=stream)
+                    body["input"][0].update(
+                        type="agent_message",
+                        role="developer",
+                        author="/root/worker",
+                        recipient="/root",
+                    )
+                    original = copy.deepcopy(body)
+                    response = await self.local.post(path, json=body)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    item = self.requests[-1]["input"][-1]
+                    self.assertEqual(set(item), {"type", "role", "content"})
+                    self.assertEqual((item["type"], item["role"]), ("message", "user"))
+                    self.assertIn("/root/worker", item["content"][0]["text"])
+                    self.assertEqual(item["content"][2]["file_id"], "file-1")
+                    self.assertEqual(body, original)
+        self.assertEqual(len(self.uploads), 1)
+
+    async def test_tool_attachment_messages_do_not_start_a_new_agent_turn(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                body = self.image_body(stream=stream)
+                body["input"] = [
+                    {"role": "user", "content": "Inspect the screenshot"},
+                    {
+                        "type": "custom_tool_call",
+                        "name": "view_image",
+                        "call_id": "call_picture",
+                        "input": "picture.png",
+                    },
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_picture",
+                        "output": [{"type": "input_image", "file_id": "file-existing"}],
+                    },
+                ]
+                expected = excel_upstream.prepare_responses_body(body)["metadata"]
+                response = await self.local.post("/responses", json=body)
+                self.assertEqual(response.status_code, 200, response.text)
+                sent = self.requests[-1]
+                self.assertEqual(sent["metadata"], expected)
+                self.assertEqual(sent["metadata"]["agent_iteration"], "2")
+                self.assertEqual(sent["input"][-2]["type"], "function_call_output")
+                self.assertEqual(sent["input"][-2]["call_id"], "call_picture")
+                self.assertEqual(
+                    sent["input"][-1]["content"][2]["file_id"], "file-existing"
+                )
+                self.assertEqual(self.uploads, [])
+
+    async def test_malformed_attributed_content_is_rejected_before_network_io(self):
+        for content in (None, True, {"private": "DO-NOT-EXPOSE"}):
+            with self.subTest(content=content):
+                response = await self.local.post(
+                    "/responses",
+                    json={
+                        "model": "gpt-5.6-sol-excel",
+                        "input": [
+                            {
+                                "type": "agent_message",
+                                "author": "/root/worker",
+                                "content": content,
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertNotIn("DO-NOT-EXPOSE", response.text)
+                self.assertIn("input[0].content", response.text)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.uploads, [])
+
+    async def test_agent_and_tool_images_share_the_request_image_limit(self):
+        body = self.image_body()
+        body["input"][0].update(type="agent_message", author="/root/worker")
+        body["input"].append(
+            {
+                "type": "function_call_output",
+                "call_id": "call_image",
+                "output": [{"type": "input_image", "file_id": "file-existing"}],
+            }
+        )
+        with patch.object(excel_images, "MAX_IMAGES", 1):
+            response = await self.local.post("/responses", json=body)
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.uploads, [])
 
     async def test_two_image_conversations_share_upload_but_keep_separate_task_identity(
         self,

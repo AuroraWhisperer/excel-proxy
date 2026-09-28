@@ -244,6 +244,8 @@ class ExcelUpstreamTests(unittest.TestCase):
             "gpt-5.6-luna-excel": "gpt-5.6-luna",
             "gpt-5.6-terra-excel": "gpt-5.6-terra",
             "gpt-5.6-sol-excel": "gpt-5.6-sol",
+            "gpt-6-sol-excel": "gpt-6-sol",
+            "gpt-6-luna-excel": "gpt-6-luna",
         }
         for requested, upstream in expected.items():
             with self.subTest(requested=requested):
@@ -1671,6 +1673,8 @@ class ExcelUpstreamTests(unittest.TestCase):
                 "gpt-5.6-luna-excel",
                 "gpt-5.6-terra-excel",
                 "gpt-5.6-sol-excel",
+                "gpt-6-sol-excel",
+                "gpt-6-luna-excel",
             ],
         )
 

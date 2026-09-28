@@ -222,10 +222,14 @@ def prepare_responses_body(
     }
 
     raw_input = source.get("input")
+    try:
+        tool_specs = _client_tool_specs(source)
+    except ValueError as exc:
+        raise ExcelRequestError(str(exc), "tools") from None
     input_items = translate_input_items(
         raw_input,
         client_tool_types(source),
-        tool_specs=_client_tool_specs(source),
+        tool_specs=tool_specs,
     )
     # Captured before the prologue is prepended: the injected instructions and
     # catalog are identical across conversations, so only the caller's own

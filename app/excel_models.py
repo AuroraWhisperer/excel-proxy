@@ -8,6 +8,8 @@ EXCEL_MODEL_UPSTREAMS = {
     "gpt-5.6-luna-excel": "gpt-5.6-luna",
     "gpt-5.6-terra-excel": "gpt-5.6-terra",
     "gpt-5.6-sol-excel": "gpt-5.6-sol",
+    "gpt-6-sol-excel": "gpt-6-sol",
+    "gpt-6-luna-excel": "gpt-6-luna",
 }
 MODEL_IDS = tuple(EXCEL_MODEL_UPSTREAMS)
 MODEL_ID = "gpt-5.6-sol-excel"
@@ -31,17 +33,19 @@ LOCAL_MODEL_CAPABILITIES = {
             "gpt-6-astra-excel": ASTRA_COMPACTION_TOKEN_LIMIT * 9 // 10,
             "gpt-5.6-luna-excel": 180_000,
         }.get(model_id, 240_000),
-        "context_window": 200_000 if "luna" in model_id else 272_000,
+        "context_window": 200_000 if model_id == "gpt-5.6-luna-excel" else 272_000,
         "display_name": {
             "gpt-6-astra-excel": "6-Astra Excel",
             "gpt-5.6-luna-excel": "5.6-Luna Excel",
             "gpt-5.6-terra-excel": "5.6-Terra Excel",
             "gpt-5.6-sol-excel": "5.6-Sol Excel",
+            "gpt-6-sol-excel": "6-Sol Excel",
+            "gpt-6-luna-excel": "6-Luna Excel",
         }.get(
             model_id, model_id.removeprefix("gpt-").removesuffix("-excel").upper()
         ),
         "input_modalities": ["text", "image"],
-        "max_context_window": 200_000 if "luna" in model_id else 272_000,
+        "max_context_window": 200_000 if model_id == "gpt-5.6-luna-excel" else 272_000,
         "messages_endpoint_supported": False,
         "model_picker_enabled": True,
         "parallel_tool_calls": True,

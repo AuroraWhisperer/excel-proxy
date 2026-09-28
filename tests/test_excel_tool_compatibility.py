@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import excel_upstream
+import excel_tool_catalog
 import excel_tool_transport
 import excel_tool_history
 import responses_protocol
@@ -36,6 +37,120 @@ def transport(envelope, name="run_officejs"):
 
 
 class ExcelToolCompatibilityTests(unittest.TestCase):
+    def test_compatible_duplicate_tools_keep_one_current_catalog_entry(self):
+        for alias in ("parameters", "inputSchema", "input_schema"):
+            with self.subTest(alias=alias):
+                current = {**FUNCTION_TOOL, "description": "Current declaration"}
+                older = {
+                    "type": "Function",
+                    "name": " exec_command ",
+                    alias: copy.deepcopy(FUNCTION_TOOL["parameters"]),
+                    "description": "Older declaration",
+                    "defer_loading": True,
+                }
+                source = {"tools": [current, older]}
+                original = copy.deepcopy(source)
+                specs = excel_tool_catalog._client_tool_specs(source)
+                self.assertEqual(len(specs), 1)
+                self.assertEqual(specs["exec_command"]["spec"], current)
+                prompt = excel_tool_catalog._client_tool_protocol_instructions(source)
+                self.assertEqual(prompt.count('"name":"exec_command"'), 1)
+                self.assertIn("Current declaration", prompt)
+                self.assertNotIn("Older declaration", prompt)
+                invalid = transport({"name": "exec_command", "arguments": {"cmd": 7}})
+                self.assertIsNone(
+                    excel_upstream.extract_native_client_tool_call(
+                        {"output": [invalid]},
+                        source,
+                        remember=False,
+                    )
+                )
+                self.assertEqual(source, original)
+                disabled = {**source, "tool_choice": "none"}
+                self.assertEqual(excel_tool_catalog.client_tool_types(disabled), {})
+                self.assertNotIn(
+                    "Current declaration",
+                    excel_tool_catalog._client_tool_protocol_instructions(disabled),
+                )
+
+    def test_duplicate_tools_reject_changed_execution_contracts(self):
+        for changes in (
+            {"type": "custom"},
+            {"parameters": {"type": "object"}},
+            {"strict": True},
+            {"encrypted": True},
+        ):
+            with self.subTest(changes=changes):
+                source = {
+                    "input": "Continue",
+                    "tools": [FUNCTION_TOOL, {**FUNCTION_TOOL, **changes}],
+                }
+                with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
+                    excel_upstream.prepare_responses_body(source)
+        source = {
+            "input": "Continue",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "tools": [
+                        {**CUSTOM_TOOL, "format": {"type": "text"}},
+                        {
+                            **CUSTOM_TOOL,
+                            "format": {
+                                "type": "grammar",
+                                "syntax": "lark",
+                                "definition": "start: /.+/",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
+            excel_upstream.prepare_responses_body(source)
+
+    def test_duplicate_schemas_do_not_confuse_booleans_with_numbers(self):
+        source = {
+            "input": "Continue",
+            "tools": [
+                {"type": "function", "name": "choose", "parameters": {"enum": [True]}},
+                {"type": "function", "name": "choose", "parameters": {"enum": [1]}},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
+            excel_upstream.prepare_responses_body(source)
+
+    def test_namespaced_custom_duplicates_preserve_literal_input_and_identity(self):
+        current = {**CUSTOM_TOOL, "description": "Current patch instructions"}
+        source = {
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "tools": [
+                        current,
+                        {
+                            **current,
+                            "description": "Previous patch instructions",
+                            "defer_loading": True,
+                        },
+                    ],
+                }
+            ]
+        }
+        prompt = excel_tool_catalog._client_tool_protocol_instructions(source)
+        self.assertEqual(prompt.count('"name":"functions.apply_patch"'), 1)
+        native = transport({"name": "functions.apply_patch", "input": PATCH_TEXT})
+        call = excel_upstream.extract_native_client_tool_call(
+            {"output": [native]}, source
+        )
+        self.assertEqual(call["input"], PATCH_TEXT)
+        self.assertEqual(
+            (call["name"], call["namespace"]), ("apply_patch", "functions")
+        )
+        self.assertEqual(excel_upstream.translate_input_items([call]), [native])
+
     def test_reused_call_id_does_not_substitute_another_calls_arguments(self):
         native = transport(
             {"name": "exec_command", "arguments": {"cmd": "read account-a.txt"}}
@@ -706,6 +821,92 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
 
 class ExcelToolCompatibilityHTTPTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_excel_contracts.ExcelHTTPContractTests.asyncSetUp
+
+    async def test_conflicting_tool_catalog_fails_before_upstream_in_both_modes(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                result = await self.local.post(
+                    "/v1/responses",
+                    json={
+                        "model": excel_upstream.MODEL_ID,
+                        "input": "Continue",
+                        "stream": stream,
+                        "tools": [
+                            FUNCTION_TOOL,
+                            {**FUNCTION_TOOL, "parameters": False},
+                        ],
+                    },
+                )
+                self.assertEqual(result.status_code, 400, result.text)
+                self.assertEqual(result.json()["error"]["param"], "tools")
+        self.assertEqual(self.requests, [])
+
+    async def test_new_models_relay_tools_once_with_compatible_duplicate_catalogs(self):
+        self.upstream_status = 200
+        native = transport(
+            {"name": "exec_command", "arguments": {"cmd": "echo checked"}}
+        )
+        self.upstream_sse = responses_protocol.sse_encode(
+            "response.completed",
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_new_model",
+                    "status": "completed",
+                    "output": [native],
+                },
+            },
+        )
+        for model in ("gpt-6-sol-excel", "gpt-6-luna-excel"):
+            for stream in (False, True):
+                with self.subTest(model=model, stream=stream):
+                    self.requests.clear()
+                    result = await self.local.post(
+                        "/v1/responses",
+                        json={
+                            "model": model,
+                            "stream": stream,
+                            "input": "Run the tool",
+                            "tools": [
+                                FUNCTION_TOOL,
+                                {**FUNCTION_TOOL, "description": "Discovered tool"},
+                            ],
+                        },
+                    )
+                    self.assertEqual(result.status_code, 200, result.text)
+                    self.assertEqual(len(self.requests), 1)
+                    self.assertEqual(
+                        json.loads(self.requests[0].content)["model"],
+                        model.removesuffix("-excel"),
+                    )
+                    if stream:
+                        events = [
+                            json.loads(line[6:])
+                            for line in result.text.splitlines()
+                            if line.startswith("data: {")
+                        ]
+                        completed = [
+                            event
+                            for event in events
+                            if event["type"] == "response.completed"
+                        ]
+                        self.assertEqual(len(completed), 1)
+                        self.assertEqual(
+                            sum(
+                                event["type"] == "response.output_item.done"
+                                for event in events
+                            ),
+                            1,
+                        )
+                        payload = completed[0]["response"]
+                    else:
+                        payload = result.json()
+                    self.assertEqual(payload["model"], model)
+                    self.assertEqual(len(payload["output"]), 1)
+                    self.assertEqual(
+                        json.loads(payload["output"][0]["arguments"]),
+                        {"cmd": "echo checked"},
+                    )
 
     async def test_rejected_calls_report_safe_reasons_in_both_modes(self):
         cases = [
