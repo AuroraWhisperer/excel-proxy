@@ -10,13 +10,14 @@ A local connection service for streaming replies, tool calls, images, and accoun
 <p>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.11 or later">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-555555" alt="Windows and macOS">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Unlicense-3A7D44" alt="License: Unlicense"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-3A7D44" alt="License: AGPL-3.0-only"></a>
 </p>
 
 <p>
   <a href="#quick-start">Quick start</a> ·
   <a href="#documentation">Documentation</a> ·
   <a href="#acknowledgments">Acknowledgments</a> ·
+  <a href="#license">License</a> ·
   <a href="https://github.com/AuroraWhisperer/excel-proxy/issues">Report an issue</a>
 </p>
 
@@ -40,13 +41,25 @@ Codex → Excel Connection Service on your machine → OpenAI Excel/BPS backend
 
 > This is an independent project, not an official OpenAI or Microsoft integration. Your account needs access to the Excel/BPS backend and the selected model; upstream access and quota limits still apply.
 
+## Interface preview
+
+![Connection settings with saved accounts and Codex connection status](docs/images/connection.png)
+
+The connection page, shown with example accounts. The interface is currently in Chinese.
+
 ## Quick start
 
 ### Windows
 
-**Requirements:** Git, Python 3.11 or later, Codex, Edge or Chrome for sign-in, and the WebView2 Runtime for the desktop window. You also need an OpenAI account with Excel/BPS access. Excel itself is not required for direct sign-in.
+**Requirements:**
 
-**1. Install** — run in PowerShell:
+- Git, Python 3.11 or later, and Codex.
+- Edge or Chrome for sign-in, and the WebView2 Runtime for the desktop window.
+- An OpenAI account with Excel/BPS access. Excel itself is not required for direct sign-in.
+
+#### 1. Install
+
+Run in PowerShell:
 
 ```powershell
 git clone https://github.com/AuroraWhisperer/excel-proxy.git
@@ -55,18 +68,24 @@ py -3 -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-**2. Sign in** — double-click **启动.vbs**. The interface is currently in Chinese; these are the labels shown in the app:
+#### 2. Sign in
+
+Double-click **启动.vbs**. The interface is currently in Chinese; these are the labels shown in the app:
 
 1. Click **登录并连接** (Sign in and connect) and finish sign-in in the official authorization window.
 2. The app checks the account with a short model request, which uses a small amount of quota. On success, it enables the account, backs up your Codex configuration, and configures the service.
 3. Restart Codex and start a new conversation.
 
-**3. Use it daily** — choose a saved account and click **使用此账号** (Use this account) to switch. Requests already in progress keep their original account. Minimizing the window keeps the service running; closing **×** stops it.
+#### 3. Use it daily
+
+Choose a saved account and click **使用此账号** (Use this account) to switch. Requests already in progress keep their original account. Minimizing the window keeps the service running; closing **×** stops it.
 
 Connection tests, Excel session import, and configuration recovery are under **高级设置** (Advanced settings). See the [sign-in guide](docs/direct-login.md) for account management details.
 
+### macOS
+
 <details>
-<summary><strong>macOS setup — use an existing Excel add-in session</strong></summary>
+<summary><strong>Set up with an existing Excel add-in session</strong></summary>
 
 Install Git and Python 3.11 or later, and sign in to the OpenAI Excel add-in first. Then run:
 
@@ -83,123 +102,18 @@ Direct sign-in with encrypted account storage is currently Windows-only.
 
 </details>
 
-## Everyday use and reference
-
-Expand the section you need. The [full guides](#documentation) cover setup, account handling, and implementation details.
-
-<details>
-<summary><strong>Start, stop, update, or restore the Codex configuration</strong></summary>
-
-On Windows, double-clicking **启动.vbs** again brings up the existing window.
-
-By default, **关闭服务时恢复原配置** restores your previous Codex configuration on exit and reconnects it on the next launch. To restore it manually, click **恢复原配置** in Advanced settings and restart Codex.
-
-To update, let active tasks finish, close the service, and run:
-
-```powershell
-git pull --ff-only
-./.venv/Scripts/python.exe -m pip install -r requirements.txt
-```
-
-Then launch it again. A second window without stopping the old process does not load updated code. On macOS, use `./.venv/bin/python` for the dependency command.
-
-For console debugging on Windows:
-
-```powershell
-./.venv/Scripts/python.exe -B app/proxy.py
-```
-
-</details>
-
-<details>
-<summary><strong>API endpoints, models, and compatibility limits</strong></summary>
-
-The service listens on `127.0.0.1:8000` and checks local connections and browser origins. The API base URL is `http://127.0.0.1:8000/v1`.
-
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /v1/responses` | Responses and tool calls, including streaming |
-| `POST /v1/responses/compact` | Context compaction |
-| `GET /v1/models` | Local model catalog |
-| `POST /v1/images/generations` | Image generation |
-| `POST /v1/images/edits` | Image editing |
-
-**Models:** 6-Astra Excel, 5.6-Sol Excel (default), 5.6-Terra Excel, and 5.6-Luna Excel. Use `GET /v1/models` to retrieve API model IDs; availability depends on your account.
-
-**Compatibility:**
-
-- Include the conversation history with each request. Continuing with only `previous_response_id` and forcing a particular tool are not supported.
-- Structured JSON output is requested through the prompt and validated before it is returned. Invalid output produces an error.
-- Image input accepts inline PNG, JPEG, GIF, and WebP: up to 20 MiB per image, 20 images per request, and 32 MiB of inline image data in total. Images in conversation history count toward these limits.
-- The service does not execute model-generated code or silently switch accounts or models when a request fails.
-
-Generation and editing have separate limits; see the [developer notes](docs/开发说明.md).
-
-</details>
-
-<details>
-<summary><strong>Usage estimates, local data, and sign-in privacy</strong></summary>
-
-The dashboard has three pages: connection settings, recent requests, and usage. The request list shows the latest 100 entries without deleting older history. API cost estimates use recorded text tokens and reference prices bundled with the app. They are not a bill or a measure of your remaining Excel quota, and they exclude image generation costs.
-
-| Platform | Storage |
-| --- | --- |
-| Windows | Settings and saved accounts: `%APPDATA%\ghcp_proxy`. Logs, usage records, and tool history: `%LOCALAPPDATA%\ghcp_proxy`. Saved credentials use Windows DPAPI encryption. |
-| macOS | Settings and history: `~/Library/Application Support/ghcp_proxy`. Caches: `~/Library/Caches/ghcp_proxy`. The service session stays in memory. |
-
-Full request logging is off by default. **记录请求全文** records future requests for debugging. Tool-call arguments are stored separately for continuity after a restart; they may contain filenames, commands, or code even when full request logging is off. Messages and images are sent to the OpenAI Excel backend.
-
-The optional **账号密码登录** form automates credential entry. Its 2FA flow sends the supplied TOTP secret to the third-party site [2fa.fun](https://2fa.fun/) to obtain a code. The normal **登录并连接** flow lets you enter the verification code yourself on the official page. See the [sign-in notes](docs/direct-login.md).
-
-</details>
-
-<details>
-<summary><strong>Troubleshooting</strong></summary>
-
-| Problem | What to try |
-| --- | --- |
-| Missing session, expired session, or HTTP 401 | Sign in again. For Excel session import, refresh the add-in and read its session again. |
-| Upstream HTTP 403 or a model access error | Select a model your account can use, then test the connection. |
-| HTTP 429 | Wait for the upstream rate limit to clear. |
-| `local_access_required` | Open the dashboard on this machine using `127.0.0.1`; do not call it from another website or a LAN address. |
-| Tool conversion error or interrupted reply | Restart the updated service and Codex. If it happens again, keep the error code and request time. |
-| The Windows launcher fails | Check the error dialog and `%LOCALAPPDATA%\ghcp_proxy\ghcp-proxy.stderr.log`. |
-
-More help: [user guide](docs/使用说明.md) · [report an issue](https://github.com/AuroraWhisperer/excel-proxy/issues).
-
-</details>
-
-<details>
-<summary><strong>Development and offline tests</strong></summary>
-
-Application code, pages, and prompts are in `app/`. Offline regressions are in `tests/`, and setup and diagnostic scripts are in `tools/`.
-
-Run the Python regressions with the repository's virtual environment:
-
-```powershell
-./.venv/Scripts/python.exe -B tools/run-offline-tests.py
-```
-
-On macOS, use `./.venv/bin/python`. The runner isolates runtime directories and blocks real HTTP requests, so these tests do not use model quota. Pass a unittest module, class, or method name for a focused run.
-
-The dashboard countdown tests use Node.js:
-
-```text
-node --test tests/test_quota_countdown.js
-```
-
-</details>
-
 ## Documentation
 
-The detailed guides are currently in Chinese. Start with the [中文 README](readme.zh-CN.md) or the [documentation index](docs/README.md).
+Choose a guide below, or browse the [documentation index](docs/README.md). Detailed guides are currently in Chinese.
 
 | Guide | Read it for |
 | --- | --- |
-| [User guide](docs/使用说明.md) | Setup, everyday use, and troubleshooting |
+| [User guide](docs/使用说明.md) | Setup, updates, configuration recovery, and troubleshooting |
 | [Sign-in and multiple accounts](docs/direct-login.md) | Direct sign-in, account switching, encrypted storage, and token refresh |
 | [Account quotas](docs/account-balances.md) | Account imports, quota displays, and reporting periods |
-| [Developer notes](docs/开发说明.md) | Module responsibilities, API limits, tests, and runtime options |
+| [API and compatibility](docs/api.md) | Endpoints, model IDs, tool support, and image limits |
+| [Privacy and local data](docs/privacy.md) | Data sent to services, credential storage, and request logs |
+| [Developer notes](docs/开发说明.md) | Module responsibilities, internal protocols, tests, and runtime options |
 | [References and changes](docs/参考项目与改进.md) | Implementation references and the changes they informed |
 
 ## Acknowledgments
@@ -215,4 +129,11 @@ The [reference notes](docs/参考项目与改进.md) record the specific source 
 
 ## License
 
-Released under the [Unlicense](LICENSE).
+Unless otherwise noted, this project is licensed under the **GNU Affero General Public License v3.0 only** (`AGPL-3.0-only`). **Commercial use is allowed.** The following is a summary; the full terms are in [LICENSE](LICENSE).
+
+- **Copies and changes:** Preserve copyright, license, and warranty notices and include the license. When distributing modified versions, identify the changes and their dates, and license the covered work as a whole under AGPL-3.0-only.
+- **Binary distribution:** Provide the complete Corresponding Source using a method permitted by section 6, including the build scripts and installation information required by the license.
+- **Modified network services:** Prominently offer every user interacting remotely with a modified version free access to that version's Corresponding Source, as required by section 13.
+- **Warranty and liability:** The software is provided as is; the warranty disclaimer and liability limitations in sections 15–16 apply to the extent permitted by law.
+
+Versions and material already released under the [Unlicense](https://github.com/AuroraWhisperer/excel-proxy/blob/3cf755eb9ed5c162e2f90ec2c950825112c548af/LICENSE) retain that grant; this change does not revoke it. Third-party code and dependencies retain their own licenses and attribution requirements.

@@ -1,5 +1,7 @@
 # 账号额度、JSON 导入与无痕登录
 
+[项目首页](../readme.zh-CN.md) · [English](../readme.md) · [文档目录](README.md)
+
 在“用量与费用 → 账号额度”点击“导入账号 JSON”。支持单个账号、账号数组、Sub2API 的 `accounts` 导出，以及 Codex `auth.json` 的 `tokens` 对象。每次最多 50 个账号、文件不超过 1 MB。混入其他平台或无效账号时，整批导入失败，不会覆盖已保存账号。
 
 必要字段是有效的 OpenAI 订阅 OAuth `access_token`。可选账号标识包括 `chatgpt_account_id` / `account_id`；也可以从 token 的未验证 JWT 声明提取路由提示，真正的权限由服务方验证。API Key 和只有 `refresh_token` 的文件不支持。不要把真实凭据提交到 Git 或发送给他人。
@@ -62,7 +64,7 @@ https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
 
 只有经明确确认的用卡请求才向固定的 `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume` 发送 POST。周期、消费请求编号及脱敏回执与凭据一同加密持久化；公开 API 不返回消费请求编号或卡 ID。
 
-移除账号只删除本机保存的查询凭据，不删除服务方账号或导入文件原件。由于保存方式是 Windows DPAPI，不能直接将加密文件复制到其他 Windows 用户或其他系统使用。
+移除账号会同时移除用量页和连接页中同一账号的本机登录信息；如果它是当前连接账号，服务会停止使用它，不会自动切换。该操作不删除服务方账号或导入文件原件。由于保存方式是 Windows DPAPI，不能直接将加密文件复制到其他 Windows 用户或其他系统使用。其他本地记录的范围见[隐私与本地数据](privacy.md)。
 
 ## 格式依据与验证
 
