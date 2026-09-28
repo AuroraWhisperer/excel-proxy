@@ -4,7 +4,6 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-import socket
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -143,8 +142,10 @@ class AccountLoginTests(unittest.TestCase):
                 self.assertNotIn("test-code", body)
                 self.assertNotIn("fake-token", body)
         self.service._thread.join(timeout=2)
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", urlsplit(self.redirect).port))
+        self.assertFalse(self.service._thread.is_alive())
+        # Reopen through HTTPServer so TCP TIME_WAIT is not a leaked listener.
+        with patch.object(login, "CALLBACK_PORTS", (urlsplit(self.redirect).port,)):
+            self.assertEqual(self.service.start()["status"], "waiting")
 
     def test_busy_ports_do_not_interrupt_existing_apps(self):
         with patch.object(login, "HTTPServer", side_effect=OSError("busy")):
