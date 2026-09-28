@@ -232,6 +232,11 @@ class RequestPromptArchiveTests(unittest.TestCase):
             ),
             patch.object(proxy, "_REQUEST_PROMPT_ACTIVE_IDS", set()),
             patch.object(proxy, "_REQUEST_PROMPT_LAST_PRUNED_MONOTONIC", 0),
+            patch.object(
+                proxy.time,
+                "monotonic",
+                return_value=proxy._REQUEST_PROMPT_PRUNE_INTERVAL_SECONDS + 1,
+            ),
         ):
             proxy._prune_request_prompt_archive()
             self.assertIsNotNone(proxy._load_request_prompt_record("older-request"))
