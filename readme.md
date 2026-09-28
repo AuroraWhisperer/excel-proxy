@@ -71,7 +71,7 @@ py -3 -m venv .venv
 
 Double-click **启动.vbs** to open the app:
 
-1. Click **登录并连接** (Sign in and connect) and finish sign-in in the official authorization window.
+1. Click **浏览器登录** (Browser sign-in) and finish sign-in in the official authorization window.
 2. The app validates the account with a short model request, using a small amount of quota. On success, it enables the account and backs up and updates your Codex configuration.
 3. Restart Codex and start a new conversation.
 
