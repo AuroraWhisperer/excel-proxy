@@ -151,6 +151,13 @@ class DashboardCacheTests(unittest.TestCase):
         )
         self.assertNotIn("request_prompt", payload["recent_requests"][0])
         self.assertTrue(payload["recent_requests"][0]["request_prompt_available"])
+        self.assertEqual(
+            payload["recent_requests"][0]["model_display_name"], "5.6-Sol Excel"
+        )
+        self.assertEqual(
+            payload["recent_requests"][0]["resolved_model"], "gpt-5.6-sol-excel"
+        )
+        self.assertNotIn("model_display_name", self.events[0])
         self.assertIn("request_prompt", self.events[0])
 
     def test_unchanged_payload_is_reused_but_force_refresh_rebuilds(self):

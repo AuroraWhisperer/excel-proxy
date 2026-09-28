@@ -742,7 +742,7 @@ class UsageTracker:
         display_resolved_model = _display_model_name(resolved_model)
         parts = [
             "INFO:",
-            f"Proxy request ({_initiator_log_label(initiator)}):",
+            f"Local request ({_initiator_log_label(initiator)}):",
             f"{request.method} {request.url.path}",
         ]
         if display_requested_model is not None:

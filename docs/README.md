@@ -1,6 +1,6 @@
 # Documentation
 
-These guides are currently in Chinese. For setup instructions in English, see the [project README](../readme.md).
+These guides are currently in Chinese. For a project overview and quick start, see the [English README](../readme.md) or [中文 README](../readme.zh-CN.md).
 
 - [User guide](使用说明.md): setup, everyday use, and troubleshooting.
 - [Sign-in and multiple accounts](direct-login.md): direct sign-in, account switching, encrypted storage, and token refresh.

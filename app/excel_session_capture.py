@@ -47,10 +47,10 @@ def _cached_session_headers(payload: dict[str, object]) -> tuple[dict[str, str],
     session_info = payload.get("sessionInfo")
     user_info = payload.get("userInfo")
     if not isinstance(session_info, dict) or not isinstance(user_info, dict):
-        raise ValueError("the stored ChatGPT session is missing session or user data")
+        raise ValueError("the stored Excel session is missing session or user data")
     access_token = session_info.get("access_token")
     if not isinstance(access_token, str) or not access_token:
-        raise ValueError("the stored ChatGPT session has no access token")
+        raise ValueError("the stored Excel session has no access token")
     claims = _jwt_payload(access_token)
     auth_claims = claims.get("https://api.openai.com/auth")
     if not isinstance(auth_claims, dict):
@@ -62,7 +62,7 @@ def _cached_session_headers(payload: dict[str, object]) -> tuple[dict[str, str],
         "chatgpt_account_user_id"
     )
     if not isinstance(account_id, str) or not account_id:
-        raise ValueError("the stored ChatGPT session has no account ID")
+        raise ValueError("the stored Excel session has no account ID")
     headers = {
         "authorization": f"Bearer {access_token}",
         "chatgpt-account-id": account_id,
@@ -124,7 +124,7 @@ def load_macos_excel_session(website_data: Path | None = None) -> dict[str, str]
     if errors:
         raise RuntimeError(errors[0])
     raise RuntimeError(
-        "No signed-in ChatGPT Excel session was found. Open the ChatGPT task pane "
+        "No signed-in Excel add-in session was found. Open the official task pane "
         "in Excel and sign in."
     )
 
@@ -289,8 +289,8 @@ def load_windows_excel_session(webview_root: Path | None = None) -> dict[str, st
     if errors:
         raise RuntimeError(errors[0])
     raise RuntimeError(
-        "No signed-in ChatGPT Excel session was found in the Windows WebView2 cache. "
-        "Open the ChatGPT task pane in Excel and sign in."
+        "No signed-in Excel add-in session was found in the Windows WebView2 cache. "
+        "Open the official task pane in Excel and sign in."
     )
 
 

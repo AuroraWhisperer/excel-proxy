@@ -154,7 +154,7 @@ async function pollLogin() {
       });
   } catch {
     $('login-message').textContent =
-      '暂时无法读取登录状态，稍后自动重试。请勿关闭代理。';
+      '暂时无法读取登录状态，稍后自动重试。请勿关闭服务。';
     if (!document.hidden) loginTimer = setTimeout(pollLogin, 3000);
   } finally {
     loginPolling = false;
@@ -340,7 +340,7 @@ function accountButton(row, action, label, className = '') {
     button.title = '刷新可用重置次数，不消耗重置卡';
   if (action === 'test')
     button.title =
-      '使用此账号发送简短模型请求，消耗少量额度，不切换当前代理账号';
+      '使用此账号发送简短模型请求，消耗少量额度，不切换当前账号';
   return button;
 }
 function accountFeedback(accountId, text, error = false) {
@@ -437,7 +437,7 @@ function renderAccountList(accountIds = null) {
             ? 'Enterprise'
             : /free/.test(plan)
               ? 'Free'
-              : 'ChatGPT';
+              : '订阅账号';
     const planTag = textElement('span', 'plan-badge', label);
     planTag.title = plan;
     platform.append(planTag);
@@ -513,7 +513,9 @@ function renderAccountList(accountIds = null) {
       const credits = textElement(
         'span',
         'account-credits',
-        quota.unlimited ? 'Credits 不限量' : `Credits ${number(quota.balance)}`
+        quota.unlimited
+          ? 'Credits：服务方未设定上限'
+          : `Credits ${number(quota.balance)}`
       );
       if (Number.isFinite(row.balance_usd))
         credits.title = `折算 ${summaryUsd(row.balance_usd)}`;
@@ -848,7 +850,7 @@ function testAccount(row) {
         });
         accountFeedback(
           row.id,
-          `连接成功 · HTTP ${result.status_code} · ${result.model} · ${number(result.elapsed_ms)} ms · 回复：${result.response_text}`
+          `连接成功 · HTTP ${result.status_code} · ${result.model_display_name || '所选模型'} · ${number(result.elapsed_ms)} ms · 回复：${result.response_text}`
         );
       } catch (error) {
         const messages = {
@@ -873,7 +875,7 @@ function testAccount(row) {
             ? '测试超时：35 秒内未收到结果，未获取到 HTTP 状态码。'
             : error.status
               ? `连接失败 · HTTP ${error.status} · ${message}`
-              : '连接失败：无法连接本地代理，未获取到 HTTP 状态码。',
+              : '连接失败：无法连接本地服务，未获取到 HTTP 状态码。',
           true
         );
       }
@@ -918,7 +920,7 @@ function removeAccount(row) {
   if (
     !row ||
     !window.confirm(
-      `移除「${row.name}」？连接与设置页的同一账号也会移除；代理将停止使用此账号。这不会注销账号，也不会删除原始 JSON 文件。`
+      `移除「${row.name}」？连接与设置页的同一账号也会移除；服务将停止使用此账号。这不会注销账号，也不会删除原始 JSON 文件。`
     )
   )
     return;
@@ -1011,7 +1013,7 @@ function renderCosts(cost, checkedAt) {
   costRows(
     'cost-model-rows',
     cost.models.map(row => [
-      row.model,
+      row.model_display_name || '—',
       number(row.request_count),
       number(row.input_tokens - row.cached_input_tokens),
       number(row.cached_input_tokens),
@@ -1024,7 +1026,7 @@ function renderCosts(cost, checkedAt) {
   for (const row of cost.models) {
     const rate = row.rates;
     rates.push([
-      row.model,
+      row.model_display_name || '—',
       ...[
         'input_per_million',
         'cached_input_per_million',
@@ -1034,7 +1036,7 @@ function renderCosts(cost, checkedAt) {
     ]);
     if (rate?.long_context_threshold)
       rates.push([
-        `${row.model} · 单次输入 > ${number(rate.long_context_threshold)}`,
+        `${row.model_display_name || '—'} · 单次输入 > ${number(rate.long_context_threshold)}`,
         ...['input', 'cached_input', 'cache_write', 'output'].map(key =>
           usd(rate[`long_context_${key}_per_million`])
         )
@@ -1113,7 +1115,7 @@ function renderUsage(row) {
   setText(
     $('usage-scope'),
     row
-      ? `${row.name} · ${label ? `${label}周期` : '暂无额度周期'} · 仅统计经本代理发送的请求`
+      ? `${row.name} · ${label ? `${label}周期` : '暂无额度周期'} · 仅统计经本服务发送的请求`
       : '添加账号后即可查看本期用量。'
   );
   if (!cost) {
@@ -1151,14 +1153,14 @@ async function refreshAll({ silent = false } = {}) {
     renderAccountList();
   }
   const failures = results.filter(result => result.status === 'rejected');
-  setText($('live-status'), failures.length ? '更新失败' : '代理运行中');
+  setText($('live-status'), failures.length ? '更新失败' : '服务运行中');
   const statusClass = `status ${failures.length ? 'error' : 'ok'}`;
   if ($('live-status').className !== statusClass)
     $('live-status').className = statusClass;
   if (failures.length) {
     feedback(
       'page-error',
-      `${failures[0].reason.message}。请确认代理正在运行，页面会自动重试。`,
+      `${failures[0].reason.message}。请确认服务正在运行，页面会自动重试。`,
       true
     );
     $('page-error').hidden = false;

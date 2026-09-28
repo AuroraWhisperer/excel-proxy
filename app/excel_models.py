@@ -38,7 +38,7 @@ LOCAL_MODEL_CAPABILITIES = {
             "gpt-5.6-terra-excel": "5.6-Terra Excel",
             "gpt-5.6-sol-excel": "5.6-Sol Excel",
         }.get(
-            model_id, model_id.removesuffix("-excel").upper().replace("GPT-", "GPT ")
+            model_id, model_id.removeprefix("gpt-").removesuffix("-excel").upper()
         ),
         "input_modalities": ["text", "image"],
         "max_context_window": 200_000 if "luna" in model_id else 272_000,
@@ -54,6 +54,14 @@ LOCAL_MODEL_CAPABILITIES = {
     }
     for model_id in MODEL_IDS
 }
+
+
+def model_display_name(model_id: str | None) -> str:
+    if not model_id:
+        return "—"
+    return LOCAL_MODEL_CAPABILITIES.get(model_id, {}).get(
+        "display_name", model_id.removeprefix("gpt-")
+    )
 
 
 def is_excel_model(model: object) -> bool:

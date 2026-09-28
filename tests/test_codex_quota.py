@@ -149,7 +149,7 @@ class QuotaProtocolTests(unittest.TestCase):
         self.assertEqual(self.sent[1]["error"]["code"], -32601)
 
     def test_not_logged_in_does_not_query_limits(self):
-        with self.assertRaisesRegex(codex_quota.QuotaError, "未使用 ChatGPT"):
+        with self.assertRaisesRegex(codex_quota.QuotaError, "未使用订阅账号"):
             self.run_rpc(self.replies({"type": "apiKey"}))
         self.assertNotIn(
             "account/rateLimits/read", [item["method"] for item in self.sent]

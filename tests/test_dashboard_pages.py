@@ -70,7 +70,7 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/ui")
         source = await self.page_source(response)
         html = source
-        self.assertIn("登录并启用代理", html)
+        self.assertIn("登录并连接", html)
         for marker in (
             'id="proxy-account"',
             'id="activate-account"',
@@ -134,7 +134,7 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         source = await self.page_source(response)
         for marker in (
             "输入、缓存和输出的单位为 token",
-            "暂无请求。启用代理后",
+            "暂无请求。启用连接后",
             "仅对后续请求生效",
             "操作可能已经执行",
             "请确认结果后再试",
@@ -644,7 +644,7 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
                 source = await self.page_source(response)
                 self.assertIn('id="navigation-error"', source)
                 self.assertIn("response.status === 404", source)
-                self.assertIn("此页面需要重启代理才能使用", source)
+                self.assertIn("此页面需要重启服务才能使用", source)
                 self.assertIn("window.location.assign(link.href)", source)
                 self.assertIn("$('navigation-error').focus()", source)
 

@@ -34,7 +34,7 @@ class ExcelOnlyTests(unittest.IsolatedAsyncioTestCase):
     async def test_dashboard_loads_from_application_static_directory(self):
         response = await self.client.get("/ui")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("<title>Excel Proxy</title>", response.text)
+        self.assertIn("<title>Excel 连接服务</title>", response.text)
 
     async def test_plain_aliases_and_default_route_to_excel(self):
         for path in ("/responses", "/v1/responses"):

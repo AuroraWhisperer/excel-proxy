@@ -43,14 +43,14 @@ macOS setup complete.
 Next steps:
   1. Activate the virtualenv:
      source "${VENV_DIR}/bin/activate"
-  2. Start the proxy:
+  2. Start the service:
      python "${SCRIPT_DIR}/app/proxy.py"
   3. Open the dashboard:
      http://127.0.0.1:8000/
 
 Notes:
-  - GPT Excel authentication loads automatically from the signed-in Excel WebKit session.
-    If its token expires, refresh the ChatGPT Excel task pane.
+  - Excel authentication loads automatically from the signed-in Excel WebKit session.
+    If its token expires, refresh the official Excel task pane.
   - Codex activation is handled from the dashboard so backups stay intact.
   - The dashboard can install a macOS login item and zsh commands: start-ghproxy / stop-ghproxy.
 EOF

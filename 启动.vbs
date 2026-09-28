@@ -6,7 +6,7 @@ root = files.GetParentFolderName(WScript.ScriptFullName)
 python = files.BuildPath(root, ".venv\Scripts\pythonw.exe")
 script = files.BuildPath(root, "app\windows_launcher.py")
 If Not files.FileExists(python) Then
-    MsgBox "The Python environment is missing. See readme.md for setup instructions.", 16, "Excel Proxy"
+    MsgBox "The Python environment is missing. See readme.md for setup instructions.", 16, "Excel Connection Service"
     WScript.Quit 1
 End If
 arguments = " start"

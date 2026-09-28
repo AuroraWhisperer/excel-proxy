@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 
+import excel_models
+
 from util import _coerce_int, _parse_iso_datetime
 from usage_metrics import (
     normalize_usage_payload,
@@ -60,6 +62,7 @@ def build_api_cost_estimate(events: list[dict], start: datetime, end: datetime) 
             models[model] = {
                 **empty_bucket(),
                 "model": model,
+                "model_display_name": excel_models.model_display_name(model),
                 "rates": dict(rates) if rates else None,
             }
         row = models[model]

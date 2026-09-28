@@ -1,30 +1,52 @@
-# Excel Proxy
+<div align="center">
 
-A local proxy that lets Codex use the ChatGPT Excel/BPS backend. You work in Codex as usual; the proxy translates requests, streams replies, and passes tool calls back to the client.
+<h1>Excel Connection Service</h1>
+
+<p><strong>Use the OpenAI Excel backend from Codex.</strong><br>
+A local connection service for streaming replies, tool calls, images, and account management.</p>
+
+<p><strong>English</strong> · <a href="readme.zh-CN.md">简体中文</a></p>
+
+<p>
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.11 or later">
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-555555" alt="Windows and macOS">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Unlicense-3A7D44" alt="License: Unlicense"></a>
+</p>
+
+<p>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#acknowledgments">Acknowledgments</a> ·
+  <a href="https://github.com/AuroraWhisperer/excel-proxy/issues">Report an issue</a>
+</p>
+
+</div>
+
+Keep working in Codex as usual. Excel Connection Service translates requests for the Excel/BPS backend and streams replies and tool calls back to the client. Codex handles file access, code edits, and shell commands.
 
 ```text
-Codex → Excel Proxy on your machine → ChatGPT Excel backend
+Codex → Excel Connection Service on your machine → OpenAI Excel/BPS backend
 ```
 
-On Windows, you can sign in through the app without opening Excel, save several accounts, and choose which one to use. macOS uses an existing session from the ChatGPT Excel add-in.
+## What you can do
 
-This is an independent project, not an official OpenAI or Microsoft integration. Your account still needs access to the upstream models. The proxy does not grant access or bypass account limits.
+| Capability | What it provides |
+| --- | --- |
+| **Everyday Codex work** | Streaming replies, tool calls, and context compaction for long conversations. |
+| **Images** | Image input, generation, and editing through the Excel backend. |
+| **Account management** | Direct sign-in without opening Excel, manual account switching, encrypted credentials, and token refresh on Windows. |
+| **Local dashboard** | Connection settings, recent requests, account quotas, and usage estimates in one place. |
+| **Configuration recovery** | Back up the original Codex configuration and restore it when the service stops. |
 
-## What it supports
+> This is an independent project, not an official OpenAI or Microsoft integration. Your account needs access to the Excel/BPS backend and the selected model; upstream access and quota limits still apply.
 
-- Streaming responses, tool calls, image input, and context compaction for long conversations.
-- Image generation and editing through the Excel backend.
-- Manual account switching, encrypted credential storage, and token refresh on Windows.
-- A local dashboard for connections, recent requests, account quotas, and usage estimates.
-- Codex configuration backups and restoration when you stop the proxy.
+## Quick start
 
-File access, code edits, and shell commands are handled by Codex. The proxy does not execute code returned by the model, and it does not silently switch accounts or models when a request fails.
+### Windows
 
-## Get started on Windows
+**Requirements:** Git, Python 3.11 or later, Codex, Edge or Chrome for sign-in, and the WebView2 Runtime for the desktop window. You also need an OpenAI account with Excel/BPS access. Excel itself is not required for direct sign-in.
 
-You need Python 3.11 or later, Codex, Edge or Chrome for sign-in, and the WebView2 Runtime for the desktop window. You also need a ChatGPT account that can use the Excel/BPS backend.
-
-Clone the repository and install its dependencies in PowerShell:
+**1. Install** — run in PowerShell:
 
 ```powershell
 git clone https://github.com/AuroraWhisperer/excel-proxy.git
@@ -33,18 +55,20 @@ py -3 -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-Double-click **启动.vbs** to open the app. The interface is currently in Chinese; the labels below match the buttons you will see.
+**2. Sign in** — double-click **启动.vbs**. The interface is currently in Chinese; these are the labels shown in the app:
 
-1. Click **登录并启用代理** (Sign in and enable proxy) and complete sign-in in the official authorization window.
-2. The app sends a short request to check the account. This uses a small amount of quota. If it succeeds, the app enables the account, backs up your Codex configuration, and points Codex at the proxy.
+1. Click **登录并连接** (Sign in and connect) and finish sign-in in the official authorization window.
+2. The app checks the account with a short model request, which uses a small amount of quota. On success, it enables the account, backs up your Codex configuration, and configures the service.
 3. Restart Codex and start a new conversation.
-4. To switch between saved accounts, select one and click **使用此账号** (Use this account). Requests already in progress keep their original account.
 
-Connection tests, the older Excel session import, and configuration recovery are under **高级设置** (Advanced settings).
+**3. Use it daily** — choose a saved account and click **使用此账号** (Use this account) to switch. Requests already in progress keep their original account. Minimizing the window keeps the service running; closing **×** stops it.
 
-## macOS setup
+Connection tests, Excel session import, and configuration recovery are under **高级设置** (Advanced settings). See the [sign-in guide](docs/direct-login.md) for account management details.
 
-Install Python 3.11 or later and sign in to the ChatGPT Excel add-in first. Then run:
+<details>
+<summary><strong>macOS setup — use an existing Excel add-in session</strong></summary>
+
+Install Git and Python 3.11 or later, and sign in to the OpenAI Excel add-in first. Then run:
 
 ```bash
 git clone https://github.com/AuroraWhisperer/excel-proxy.git
@@ -57,20 +81,27 @@ Open the [local dashboard](http://127.0.0.1:8000/). Under **高级设置**, clic
 
 Direct sign-in with encrypted account storage is currently Windows-only.
 
-## Starting, stopping, and updating
+</details>
 
-On Windows, double-clicking the launcher again brings up the existing window. Minimizing it leaves the proxy running; closing it with **×** stops the proxy.
+## Everyday use and reference
 
-By default, **关闭代理时恢复原配置** restores your previous Codex configuration on exit and reconnects it on the next launch. You can also click **恢复原配置** in Advanced settings and restart Codex to restore the configuration manually.
+Expand the section you need. The [full guides](#documentation) cover setup, account handling, and implementation details.
 
-To update, let active tasks finish, close the proxy, and run:
+<details>
+<summary><strong>Start, stop, update, or restore the Codex configuration</strong></summary>
+
+On Windows, double-clicking **启动.vbs** again brings up the existing window.
+
+By default, **关闭服务时恢复原配置** restores your previous Codex configuration on exit and reconnects it on the next launch. To restore it manually, click **恢复原配置** in Advanced settings and restart Codex.
+
+To update, let active tasks finish, close the service, and run:
 
 ```powershell
 git pull --ff-only
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-Then launch it again. Opening a second window without stopping the old process does not load updated code. On macOS, use `./.venv/bin/python` for the dependency command.
+Then launch it again. A second window without stopping the old process does not load updated code. On macOS, use `./.venv/bin/python` for the dependency command.
 
 For console debugging on Windows:
 
@@ -78,7 +109,10 @@ For console debugging on Windows:
 ./.venv/Scripts/python.exe -B app/proxy.py
 ```
 
-## API and limits
+</details>
+
+<details>
+<summary><strong>API endpoints, models, and compatibility limits</strong></summary>
 
 The service listens on `127.0.0.1:8000` and checks local connections and browser origins. The API base URL is `http://127.0.0.1:8000/v1`.
 
@@ -90,34 +124,53 @@ The service listens on `127.0.0.1:8000` and checks local connections and browser
 | `POST /v1/images/generations` | Image generation |
 | `POST /v1/images/edits` | Image editing |
 
-The bundled catalog includes `gpt-6-astra-excel`, `gpt-5.6-sol-excel` (the default), `gpt-5.6-terra-excel`, and `gpt-5.6-luna-excel`. These are the proxy's model IDs; appearing in the catalog does not guarantee that your account can use a model.
+**Models:** 6-Astra Excel, 5.6-Sol Excel (default), 5.6-Terra Excel, and 5.6-Luna Excel. Use `GET /v1/models` to retrieve API model IDs; availability depends on your account.
 
-Requests must include the conversation history. Continuing with only `previous_response_id` and forcing a particular tool are not supported. Structured JSON output is requested through the prompt and validated before it is returned; invalid output produces an error.
+**Compatibility:**
 
-Image input accepts inline PNG, JPEG, GIF, and WebP: up to 20 MiB per image, 20 images per request, and 32 MiB of inline image data in total. Images included in conversation history count toward those limits. Generation and editing have separate limits documented in the [developer notes](docs/开发说明.md).
+- Include the conversation history with each request. Continuing with only `previous_response_id` and forcing a particular tool are not supported.
+- Structured JSON output is requested through the prompt and validated before it is returned. Invalid output produces an error.
+- Image input accepts inline PNG, JPEG, GIF, and WebP: up to 20 MiB per image, 20 images per request, and 32 MiB of inline image data in total. Images in conversation history count toward these limits.
+- The service does not execute model-generated code or silently switch accounts or models when a request fails.
 
-## Usage and local data
+Generation and editing have separate limits; see the [developer notes](docs/开发说明.md).
+
+</details>
+
+<details>
+<summary><strong>Usage estimates, local data, and sign-in privacy</strong></summary>
 
 The dashboard has three pages: connection settings, recent requests, and usage. The request list shows the latest 100 entries without deleting older history. API cost estimates use recorded text tokens and reference prices bundled with the app. They are not a bill or a measure of your remaining Excel quota, and they exclude image generation costs.
 
-On Windows, settings and saved accounts live in `%APPDATA%\ghcp_proxy`; logs, usage records, and tool history live in `%LOCALAPPDATA%\ghcp_proxy`. Saved credentials are encrypted with Windows DPAPI. On macOS, settings and history use `~/Library/Application Support/ghcp_proxy`, caches use `~/Library/Caches/ghcp_proxy`, and the proxy session stays in memory.
+| Platform | Storage |
+| --- | --- |
+| Windows | Settings and saved accounts: `%APPDATA%\ghcp_proxy`. Logs, usage records, and tool history: `%LOCALAPPDATA%\ghcp_proxy`. Saved credentials use Windows DPAPI encryption. |
+| macOS | Settings and history: `~/Library/Application Support/ghcp_proxy`. Caches: `~/Library/Caches/ghcp_proxy`. The service session stays in memory. |
 
-Full request logging is off by default. Enabling **记录请求全文** records future requests for debugging. Tool-call arguments are stored separately so tasks can continue after a restart; they may contain filenames, commands, or code even when full request logging is off. Messages and images are sent to the OpenAI Excel backend.
+Full request logging is off by default. **记录请求全文** records future requests for debugging. Tool-call arguments are stored separately for continuity after a restart; they may contain filenames, commands, or code even when full request logging is off. Messages and images are sent to the OpenAI Excel backend.
 
-The optional **账号密码登录** form automates credential entry. Its 2FA flow sends the supplied TOTP secret to the third-party site `2fa.fun` to obtain a code. Use the normal **登录并启用代理** flow if you prefer to enter your verification code yourself. See the [sign-in notes](docs/direct-login.md) for details.
+The optional **账号密码登录** form automates credential entry. Its 2FA flow sends the supplied TOTP secret to the third-party site [2fa.fun](https://2fa.fun/) to obtain a code. The normal **登录并连接** flow lets you enter the verification code yourself on the official page. See the [sign-in notes](docs/direct-login.md).
 
-## Troubleshooting
+</details>
+
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
 | Problem | What to try |
 | --- | --- |
-| Missing session, expired session, or HTTP 401 | Sign in again. If you use the Excel session import, refresh the add-in and read its session again. |
+| Missing session, expired session, or HTTP 401 | Sign in again. For Excel session import, refresh the add-in and read its session again. |
 | Upstream HTTP 403 or a model access error | Select a model your account can use, then test the connection. |
 | HTTP 429 | Wait for the upstream rate limit to clear. |
 | `local_access_required` | Open the dashboard on this machine using `127.0.0.1`; do not call it from another website or a LAN address. |
-| Tool conversion error or interrupted reply | Restart the updated proxy and Codex. If it happens again, keep the error code and request time. |
+| Tool conversion error or interrupted reply | Restart the updated service and Codex. If it happens again, keep the error code and request time. |
 | The Windows launcher fails | Check the error dialog and `%LOCALAPPDATA%\ghcp_proxy\ghcp-proxy.stderr.log`. |
 
-## Development
+More help: [user guide](docs/使用说明.md) · [report an issue](https://github.com/AuroraWhisperer/excel-proxy/issues).
+
+</details>
+
+<details>
+<summary><strong>Development and offline tests</strong></summary>
 
 Application code, pages, and prompts are in `app/`. Offline regressions are in `tests/`, and setup and diagnostic scripts are in `tools/`.
 
@@ -127,7 +180,7 @@ Run the Python regressions with the repository's virtual environment:
 ./.venv/Scripts/python.exe -B tools/run-offline-tests.py
 ```
 
-On macOS, use `./.venv/bin/python`. The runner isolates runtime directories and blocks real HTTP requests, so these tests do not use model quota. You can pass a unittest module, class, or method name to run a smaller selection.
+On macOS, use `./.venv/bin/python`. The runner isolates runtime directories and blocks real HTTP requests, so these tests do not use model quota. Pass a unittest module, class, or method name for a focused run.
 
 The dashboard countdown tests use Node.js:
 
@@ -135,10 +188,31 @@ The dashboard countdown tests use Node.js:
 node --test tests/test_quota_countdown.js
 ```
 
-The [documentation index](docs/README.md) links to the user guide, account handling, and API details. Those guides are currently in Chinese.
+</details>
 
-## Credits and license
+## Documentation
 
-Thanks to [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api) and [Kaixxrua/excel-codex-bridge](https://github.com/Kaixxrua/excel-codex-bridge) for their work on Excel protocol handling, tool history, image uploads, and local access protection. The [reference notes](docs/参考项目与改进.md) describe the implementations consulted.
+The detailed guides are currently in Chinese. Start with the [中文 README](readme.zh-CN.md) or the [documentation index](docs/README.md).
+
+| Guide | Read it for |
+| --- | --- |
+| [User guide](docs/使用说明.md) | Setup, everyday use, and troubleshooting |
+| [Sign-in and multiple accounts](docs/direct-login.md) | Direct sign-in, account switching, encrypted storage, and token refresh |
+| [Account quotas](docs/account-balances.md) | Account imports, quota displays, and reporting periods |
+| [Developer notes](docs/开发说明.md) | Module responsibilities, API limits, tests, and runtime options |
+| [References and changes](docs/参考项目与改进.md) | Implementation references and the changes they informed |
+
+## Acknowledgments
+
+Thanks to the authors, maintainers, and contributors of these projects for sharing their implementations and tests:
+
+| Project | What we referenced |
+| --- | --- |
+| [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api) | Excel/Basispoints protocol handling, tool history and batch validation, tool transport recovery, and image limits. |
+| [Kaixxrua/excel-codex-bridge](https://github.com/Kaixxrua/excel-codex-bridge) | Local Codex-to-Excel bridging, local access protection, client tool conversion, attachment uploads, and error handling. |
+
+The [reference notes](docs/参考项目与改进.md) record the specific source versions and the scope of each adaptation.
+
+## License
 
 Released under the [Unlicense](LICENSE).
