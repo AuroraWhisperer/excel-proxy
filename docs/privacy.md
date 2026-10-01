@@ -13,8 +13,9 @@
 | 官方窗口登录 | 在 OpenAI 官方授权页面填写账号、密码和验证码，授权结果通过本机回调交给服务。 |
 | 账号额度查询 | 使用所选账号的 access token 请求 ChatGPT 的额度与重置卡接口。 |
 | 账号密码登录 | 账号和密码填入 OpenAI 官方页面；提供的 2FA 密钥会发送给第三方网站 2fa.fun 获取验证码。 |
+| 首页导入 JSON | 文件交给本机服务解析，使用账号访问令牌请求 OpenAI Excel/BPS 接口；需要续期时，刷新令牌只发往固定的 OpenAI 官方授权接口。 |
 
-**账号密码登录会将 2FA 密钥交给第三方。** 如需自行输入验证码，使用 **登录并连接**，在官方页面完成验证。账密输入格式和自动填写行为见[登录说明](direct-login.md#账号密码登录与-json-文件)。
+**账号密码登录会将 2FA 密钥交给第三方。** 如需自行输入验证码，使用 **手动登录**，在官方页面完成验证。账密输入格式和自动填写行为见[登录说明](direct-login.md#账号密码登录与-json-文件)。
 
 ## 本地保存位置
 
@@ -31,7 +32,7 @@
 
 Windows 的账号凭据和导入的 Excel 会话使用当前用户的 DPAPI 加密；加密文件不能直接复制给其他 Windows 用户或其他系统使用。此加密范围不包括普通日志、用量记录和工具历史。
 
-- **直接登录账号**存于 `proxy-accounts.dpapi`，保存 access token、授权服务器返回的 refresh token、有效期和已选择的账号。
+- **连接账号**（直接登录或首页 JSON 导入）存于 `proxy-accounts.dpapi`，保存 access token、refresh token、有效期和已选择的账号，不保存原始 JSON 或 ID token。
 - **额度查询账号**存于 `account-balances.dpapi`，只保存查询所需的 access token，不持久化 refresh token 或 ID token。
 - 密码、验证码和自动登录用到的 2FA 密钥不写入账号文件或登录日志；浏览器页面只收到脱敏状态，不获得保存的 token。
 

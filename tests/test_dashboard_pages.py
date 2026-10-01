@@ -70,7 +70,7 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/ui")
         source = await self.page_source(response)
         html = source
-        self.assertIn("浏览器登录", html)
+        self.assertIn("手动登录", html)
         for marker in (
             'id="proxy-account"',
             'id="activate-account"',
@@ -295,11 +295,14 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.count("$('start-login').addEventListener"), 1)
 
     async def test_both_pages_share_transient_credential_dialog(self):
-        for path, button in (("/ui", "auto-login-proxy"), ("/ui/usage", "auto-login")):
+        for path, button, label in (
+            ("/ui", "auto-login-proxy", "自动登录"),
+            ("/ui/usage", "auto-login", "账号密码登录"),
+        ):
             response = await self.client.get(path)
             source = await self.page_source(response)
             self.assertIn(f'id="{button}"', source)
-            self.assertIn("账号密码登录", source)
+            self.assertIn(label, source)
             self.assertEqual(source.count('src="/ui/account-login.js"'), 1)
             self.assertEqual(source.count(f"$('{button}').addEventListener"), 1)
         response = await self.client.get("/ui/account-login.js")

@@ -9,6 +9,7 @@ const state = {
   testing: false,
   loading: false,
   signingIn: false,
+  importing: false,
   activating: false
 };
 let loginTimer = null;
@@ -59,12 +60,18 @@ function renderSession(payload) {
 }
 function renderAccountControls() {
   const rows = state.accounts?.accounts || [];
-  const locked = state.signingIn || state.activating;
+  const locked = state.signingIn || state.importing || state.activating;
   $('login-proxy').textContent = state.signingIn
     ? '等待登录…'
-    : '浏览器登录';
+    : '手动登录';
   $('login-proxy').disabled = !state.accounts || locked;
   $('auto-login-proxy').disabled = !state.accounts || locked;
+  $('import-proxy-accounts').disabled = !state.accounts || locked;
+  $('import-proxy-accounts').textContent = state.importing
+    ? state.activating
+      ? '正在连接…'
+      : '正在导入…'
+    : '导入 JSON';
   $('cancel-proxy-login').hidden = !state.signingIn;
   $('proxy-account').disabled = locked;
   const selected = rows.find(row => row.id === $('proxy-account').value);
@@ -297,7 +304,7 @@ document
     }
   });
 async function startProxyLogin(credentials = null) {
-  if (state.signingIn || state.activating) return;
+  if (state.signingIn || state.importing || state.activating) return;
   loginGeneration += 1;
   state.signingIn = true;
   renderAccountControls();
@@ -316,6 +323,23 @@ async function startProxyLogin(credentials = null) {
     feedback('proxy-feedback', error.message, true);
   }
 }
+document.querySelectorAll('.login-help').forEach(help => {
+  const tooltip = help.querySelector('[role="tooltip"]');
+  const show = () => {
+    delete help.dataset.dismissed;
+    const left = help.getBoundingClientRect().left;
+    const available = document.documentElement.clientWidth - tooltip.offsetWidth - 12;
+    tooltip.style.left = `${Math.max(12, Math.min(left, available)) - left}px`;
+  };
+  help.addEventListener('pointerenter', show);
+  help.addEventListener('focusin', show);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape')
+    document.querySelectorAll('.login-help').forEach(help => {
+      help.dataset.dismissed = '';
+    });
+});
 $('login-proxy').addEventListener('click', () => startProxyLogin());
 $('auto-login-proxy').addEventListener('click', async () => {
   let credentials = await window.promptAccountCredentials();
@@ -323,6 +347,43 @@ $('auto-login-proxy').addEventListener('click', async () => {
   const request = startProxyLogin(credentials);
   credentials = null;
   await request;
+});
+$('import-proxy-accounts').addEventListener('click', () =>
+  $('proxy-account-file').click()
+);
+$('proxy-account-file').addEventListener('change', async () => {
+  const file = $('proxy-account-file').files[0];
+  $('proxy-account-file').value = '';
+  if (!file || state.signingIn || state.importing || state.activating) return;
+  state.importing = true;
+  renderAccountControls();
+  feedback('proxy-feedback', '正在导入账号…');
+  try {
+    if (file.size > 1024 * 1024)
+      throw new Error('JSON 文件不能超过 1 MB，请拆分后导入。');
+    let document;
+    try {
+      document = JSON.parse((await file.text()).replace(/^\uFEFF/, ''));
+    } catch {
+      throw new Error('无法解析 JSON。请使用账号导出的原始 JSON 文件。');
+    }
+    const result = await post('/api/proxy-accounts/import', document);
+    renderAccounts(result);
+    $('proxy-account').value = result.imported_ids[0];
+    if (result.imported_ids.length === 1) {
+      await activateAccount(result.imported_ids[0]);
+    } else {
+      feedback(
+        'proxy-feedback',
+        `已导入 ${result.imported_ids.length} 个账号，请选择账号后点击“使用此账号”。`
+      );
+    }
+  } catch (error) {
+    feedback('proxy-feedback', error.message, true);
+  } finally {
+    state.importing = false;
+    renderAccountControls();
+  }
 });
 $('cancel-proxy-login').addEventListener('click', async () => {
   loginGeneration += 1;

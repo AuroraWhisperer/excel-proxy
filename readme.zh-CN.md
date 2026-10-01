@@ -1,3 +1,7 @@
+# ⚠️ 此方法已于 2026 年 10 月 1 日失效
+
+下述通过 Excel/BPS 后端接入的方法已失效。仓库保留完整源码和安装说明，可用于本地安装、启动及研究；控制面板能打开不代表上游模型请求可用。
+
 <div align="center">
 
 <h1>Excel 连接服务</h1>
@@ -52,7 +56,7 @@ Codex → 本机 Excel 连接服务 → OpenAI Excel/BPS 后端
 
 **运行环境：**
 
-- Git、Python 3.11+ 和 Codex。
+- Python 3.11+ 和 Codex；使用 ZIP 下载时无需 Git。
 - Edge 或 Chrome（用于登录），以及 WebView2 Runtime（用于桌面窗口）。
 - 可访问 Excel/BPS 的 OpenAI 账号。直接登录无需安装或打开 Excel。
 
@@ -67,11 +71,15 @@ py -3 -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-#### 2. 登录
+也可[下载 ZIP](https://github.com/AuroraWhisperer/excel-proxy/archive/refs/heads/main.zip)，解压后在包含 **启动.vbs** 的文件夹打开 PowerShell，仅执行上面最后两条命令。仓库包含运行所需的源码和资源；`.venv/` 需在本机创建，`tmp/` 仅存放本地归档，不参与程序运行，也不随仓库下载。
+
+#### 2. 打开程序
 
 双击 **启动.vbs** 打开窗口：
 
-1. 点击 **浏览器登录**，在官方授权窗口完成登录。
+以下连接步骤保留为原有流程说明，仍受顶部的 10 月 1 日失效提示约束。
+
+1. 点击 **手动登录**，在官方授权窗口完成登录。
 2. 程序会用一次简短模型请求验证账号，消耗少量额度。验证通过后，自动启用账号、备份并更新 Codex 配置。
 3. 重启 Codex，开始新对话。
 

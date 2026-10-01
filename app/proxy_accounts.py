@@ -26,6 +26,9 @@ from windows_dpapi import (
 
 def _normalize(payload):
     record_id, account = _normalize_account(payload)
+    if payload.get("type", "oauth") not in ("oauth", "codex"):
+        raise BalanceError("仅支持 OpenAI OAuth 账号 JSON，请检查导出文件。")
+    credentials = payload.get("credentials", payload.get("tokens", payload))
     if not account["account_id"]:
         raise BalanceError("登录缺少账号标识，请重新登录。")
     claims = _claims(account["access_token"])
@@ -35,7 +38,9 @@ def _normalize(payload):
         account["account_id"],
     ):
         raise BalanceError("登录的账号标识不一致，请重新登录。")
-    expires = claims.get("exp", payload.get("expires_at"))
+    expires = claims.get(
+        "exp", credentials.get("expires_at", payload.get("expires_at"))
+    )
     if (
         isinstance(expires, bool)
         or not isinstance(expires, (int, float))
@@ -43,7 +48,7 @@ def _normalize(payload):
         or expires <= 0
     ):
         raise BalanceError("登录缺少有效期，请重新登录。")
-    refresh = payload.get("refresh_token", "")
+    refresh = credentials.get("refresh_token", "")
     if not isinstance(refresh, str) or (
         refresh and not re.fullmatch(r"[!-~]{1,32768}", refresh)
     ):
@@ -179,25 +184,35 @@ class ProxyAccountStore:
             }
 
     def import_accounts(self, payload):
-        key, row = _normalize(payload)
-        if row["expires_at"] <= time.time():
-            raise BalanceError("新登录凭据已过期，请重新登录。")
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            payload = payload["data"]
+        items = (
+            payload.get("accounts", [payload]) if isinstance(payload, dict) else payload
+        )
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_ACCOUNTS:
+            raise BalanceError("请选择包含 1–50 个账号的 JSON 文件。")
+        imported = {}
+        for item in items:
+            key, row = _normalize(item)
+            if row["expires_at"] <= time.time() and not row["refresh_token"]:
+                raise BalanceError(
+                    "账号凭据已过期且无法续期，请重新登录或导入新的 JSON。"
+                )
+            imported[key] = row
         with self._lock:
             self._load()
-            updated = (
-                self._accounts
-                if key == self._active_id
-                else {**self._accounts, key: row}
-            )
-            pending = {
-                key_: value for key_, value in self._pending.items() if key_ != key
-            }
-            if key == self._active_id:
-                pending[key] = row
+            updated = dict(self._accounts)
+            pending = dict(self._pending)
+            for key, row in imported.items():
+                if key == self._active_id:
+                    pending[key] = row
+                else:
+                    updated[key] = row
+                    pending.pop(key, None)
             if len(updated) > MAX_ACCOUNTS:
                 raise BalanceError("最多保存 50 个连接账号，请先移除不再使用的账号。")
             self._commit(updated, self._active_id, self._source, pending)
-            return {**self.snapshot(), "imported_ids": [key]}
+            return {**self.snapshot(), "imported_ids": list(imported)}
 
     def refresh_after_unauthorized(self, headers):
         """Renew only the selected identity whose access token was rejected."""

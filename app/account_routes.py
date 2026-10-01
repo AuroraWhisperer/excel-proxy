@@ -262,6 +262,18 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
             headers={"Cache-Control": "no-store"},
         )
 
+    @router.post("/api/proxy-accounts/import")
+    async def proxy_accounts_import_api(request: Request):
+        payload = await _balance_json(request)
+        if dependencies.activation_lock.locked():
+            raise HTTPException(
+                status_code=409, detail="正在验证并切换账号，请稍后再导入。"
+            )
+        async with dependencies.activation_lock:
+            return await _proxy_accounts_response(
+                proxy_accounts.proxy_account_store.import_accounts, payload
+            )
+
     @router.post("/api/proxy-accounts/login/{action}")
     async def proxy_login_action_api(action: str, request: Request):
         payload = await _balance_json(request)

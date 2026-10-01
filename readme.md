@@ -1,3 +1,7 @@
+# ⚠️ 此方法 10.1 已失效 / No longer working (2026-10-01)
+
+The Excel/BPS access method described below no longer works. The source and setup instructions are retained for local installation, startup, and reference; a running dashboard does not mean upstream model requests will succeed.
+
 <div align="center">
 
 <h1>Excel Connection Service</h1>
@@ -52,7 +56,7 @@ Shown with example accounts. The interface is currently in Chinese.
 
 **Requirements:**
 
-- Git, Python 3.11 or later, and Codex.
+- Python 3.11 or later and Codex. Git is optional when downloading a ZIP.
 - Edge or Chrome for sign-in, and the WebView2 Runtime for the desktop window.
 - An OpenAI account with Excel/BPS access. Excel itself is not required for direct sign-in.
 
@@ -67,11 +71,15 @@ py -3 -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-#### 2. Sign in
+Alternatively, [download the ZIP](https://github.com/AuroraWhisperer/excel-proxy/archive/refs/heads/main.zip), extract it, open PowerShell in the folder containing **启动.vbs**, and run the last two commands above. The repository includes the required source and resources; `.venv/` must be created locally, and `tmp/` contains only local archives that are not needed to run the app.
+
+#### 2. Open the app
 
 Double-click **启动.vbs** to open the app:
 
-1. Click **浏览器登录** (Browser sign-in) and finish sign-in in the official authorization window.
+The following connection steps describe the original workflow. The October 1 failure notice above still applies.
+
+1. Click **手动登录** (Manual sign-in) and finish sign-in in the official authorization window.
 2. The app validates the account with a short model request, using a small amount of quota. On success, it enables the account and backs up and updates your Codex configuration.
 3. Restart Codex and start a new conversation.
 

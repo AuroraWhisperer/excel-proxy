@@ -37,32 +37,55 @@
             选择一种方式登录 ChatGPT 账号。
           </p>
           <div class="login-methods">
-            <div>
+            <div class="login-method">
               <button
                 id="login-proxy"
                 class="primary"
                 aria-describedby="browser-login-hint"
                 disabled
-              >浏览器登录</button>
-              <p id="browser-login-hint" class="hint">
-                打开官方页面，手动完成登录。
-              </p>
+              >手动登录</button>
+              <span class="login-help">
+                <button type="button" class="login-help-trigger" aria-label="手动登录说明" aria-describedby="browser-login-hint">?</button>
+                <span id="browser-login-hint" class="login-tooltip" role="tooltip">
+                  打开官方页面，手动完成登录。通过连接测试后启用账号并配置 Codex；测试会消耗少量额度，失败保留原连接。
+                </span>
+              </span>
             </div>
-            <div>
+            <div class="login-method">
               <button
                 id="auto-login-proxy"
                 aria-describedby="credential-login-hint"
                 disabled
-              >账号密码登录</button>
-              <p id="credential-login-hint" class="hint">
-                粘贴邮箱、密码和 2FA 密钥，自动填写登录。
-              </p>
+              >自动登录</button>
+              <span class="login-help">
+                <button type="button" class="login-help-trigger" aria-label="自动登录说明" aria-describedby="credential-login-hint">?</button>
+                <span id="credential-login-hint" class="login-tooltip" role="tooltip">
+                  粘贴邮箱、密码和 2FA 密钥，自动填写登录。2FA 密钥会发送至 2fa.fun 获取验证码；连接测试通过后启用账号并配置 Codex。
+                </span>
+              </span>
+            </div>
+            <div class="login-method">
+              <button
+                id="import-proxy-accounts"
+                aria-describedby="json-login-hint"
+                disabled
+              >导入 JSON</button>
+              <span class="login-help">
+                <button type="button" class="login-help-trigger" aria-label="JSON 导入说明" aria-describedby="json-login-hint">?</button>
+                <span id="json-login-hint" class="login-tooltip" role="tooltip">
+                  选择 Sub2API 或 Codex 账号 JSON 文件。单账号会自动测试并连接，多账号需选择后启用；测试失败保留原连接。
+                </span>
+              </span>
             </div>
           </div>
+          <input
+            id="proxy-account-file"
+            type="file"
+            accept=".json,application/json"
+            aria-label="选择账号 JSON 文件"
+            hidden
+          />
           <button id="cancel-proxy-login" hidden>取消登录</button>
-          <p class="hint">
-            登录或切换时先测试连接，通过后启用账号并配置 Codex；测试消耗少量额度，失败不会切换账号。
-          </p>
           <p id="proxy-feedback" class="feedback" role="status"></p>
           <div id="account-switcher" class="account-switcher" hidden>
             <div class="field">

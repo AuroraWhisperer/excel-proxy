@@ -9,6 +9,7 @@ __pycache__/
 .live-proxy*
 .playwright-mcp/
 .pytest_cache/
+.ruff_cache/
 .tmp-pytest/
 .tmp-ui-check.js
 

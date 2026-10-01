@@ -132,6 +132,147 @@ class LinkedAccountRemovalTests(unittest.IsolatedAsyncioTestCase):
         self.assert_remaining([self.active], self.active)
 
 
+class ProxyJsonImportTests(unittest.TestCase):
+    def test_supported_envelopes_preserve_nested_refresh_credentials(self):
+        token = credential(expires=time.time() + 30)
+        exported = {
+            "platform": "openai",
+            "type": "oauth",
+            "credentials": {**token, "id_token": "unused-id-token"},
+        }
+        for payload in (
+            token,
+            {"type": "codex", "tokens": token},
+            exported,
+            [exported],
+            {"accounts": [exported], "proxies": [], "x_revive_manifest": {}},
+            {"data": {"accounts": [exported]}},
+        ):
+            with self.subTest(
+                envelope=list(payload) if isinstance(payload, dict) else "array"
+            ):
+                store = accounts.ProxyAccountStore()
+                result = store.import_accounts(payload)
+                record_id = result["imported_ids"][0]
+                self.assertTrue(result["accounts"][0]["renewable"])
+                self.assertIsNone(result["active_id"])
+                for secret in (*token.values(), "unused-id-token"):
+                    self.assertNotIn(secret, json.dumps(result))
+                self.assertNotIn("id_token", store._accounts[record_id])
+                with patch.object(
+                    accounts, "refresh_credentials", return_value=credential()
+                ) as refresh:
+                    headers = store.headers_for(record_id)
+                refresh.assert_called_once_with("refresh-secret")
+                self.assertEqual(headers["chatgpt-account-id"], "account-a")
+
+    def test_nested_expiry_and_access_token_only_accounts(self):
+        store = accounts.ProxyAccountStore()
+        result = store.import_accounts(
+            {
+                "tokens": {
+                    "access_token": "synthetic-opaque-token",
+                    "account_id": "account-a",
+                    "expires_at": time.time() + 3600,
+                }
+            }
+        )
+        record_id = result["imported_ids"][0]
+        self.assertFalse(result["accounts"][0]["renewable"])
+        self.assertEqual(
+            store.headers_for(record_id)["authorization"],
+            "Bearer synthetic-opaque-token",
+        )
+
+    def test_expired_renewable_import_refreshes_before_use(self):
+        store = accounts.ProxyAccountStore()
+        result = store.import_accounts(
+            {"credentials": credential(expires=time.time() - 30)}
+        )
+        self.assertTrue(result["accounts"][0]["expired"])
+        self.assertTrue(result["accounts"][0]["renewable"])
+        replacement = credential(refresh="rotated-import-secret")
+        with patch.object(
+            accounts, "refresh_credentials", return_value=replacement
+        ) as refresh:
+            headers = store.headers_for(result["imported_ids"][0])
+        refresh.assert_called_once_with("refresh-secret")
+        self.assertEqual(
+            headers["authorization"], "Bearer " + replacement["access_token"]
+        )
+
+    def test_invalid_batches_never_replace_saved_accounts(self):
+        store = accounts.ProxyAccountStore()
+        first = store.import_accounts(credential())["imported_ids"][0]
+        store.activate(first, store.headers_for(first)["authorization"])
+        previous = store.snapshot()
+        for invalid in (
+            {"credentials": {"refresh_token": "only-refresh"}},
+            {"platform": "anthropic", "credentials": credential()},
+            {"type": "api-key", "credentials": credential()},
+            {"credentials": {**credential(), "chatgpt_account_id": "wrong-account"}},
+            {"credentials": {**credential(), "refresh_token": "bad\nheader"}},
+            {"tokens": credential(expires=time.time() - 30, refresh="")},
+        ):
+            with self.subTest(fields=list(invalid)):
+                with self.assertRaises(BalanceError):
+                    store.import_accounts([credential("account-b"), invalid])
+                self.assertEqual(store.snapshot(), previous)
+        for invalid in (
+            [],
+            {"accounts": []},
+            {"accounts": "invalid"},
+            [credential()] * 51,
+            [credential(expires=time.time() - 30, refresh=""), credential()],
+        ):
+            with self.assertRaises(BalanceError):
+                store.import_accounts(invalid)
+            self.assertEqual(store.snapshot(), previous)
+
+    def test_batch_deduplicates_and_stages_active_replacement(self):
+        store = accounts.ProxyAccountStore()
+        original = credential()
+        first = store.import_accounts(original)["imported_ids"][0]
+        store.activate(first, store.headers_for(first)["authorization"])
+        replacement = credential(expires=time.time() + 7200)
+        result = store.import_accounts(
+            {
+                "accounts": [
+                    {"credentials": replacement},
+                    credential("account-b"),
+                    credential("account-b"),
+                ]
+            }
+        )
+        self.assertEqual(len(result["imported_ids"]), 2)
+        self.assertEqual(result["active_id"], first)
+        self.assertTrue(result["accounts"][0]["pending"])
+        self.assertEqual(
+            store.headers_for(first, active=True)["authorization"],
+            "Bearer " + original["access_token"],
+        )
+        candidate = store.headers_for(first)["authorization"]
+        self.assertEqual(candidate, "Bearer " + replacement["access_token"])
+        store.activate(first, candidate)
+        self.assertFalse(store.snapshot()["accounts"][0]["pending"])
+
+    def test_batch_limit_and_save_failure_leave_state_unchanged(self):
+        store = accounts.ProxyAccountStore()
+        store.import_accounts([credential(f"account-{i}") for i in range(50)])
+        previous = store.snapshot()
+        with self.assertRaises(BalanceError):
+            store.import_accounts([credential("account-0"), credential("account-new")])
+        self.assertEqual(store.snapshot(), previous)
+        with (
+            patch.object(
+                store, "_commit", side_effect=BalanceError("save failed", 503)
+            ),
+            self.assertRaises(BalanceError),
+        ):
+            store.import_accounts({"tokens": credential("account-0")})
+        self.assertEqual(store.snapshot(), previous)
+
+
 class ProxyAccountStoreTests(unittest.TestCase):
     def setUp(self):
         self.store = accounts.ProxyAccountStore()
@@ -671,6 +812,85 @@ class ProxyAccountRouteTests(unittest.IsolatedAsyncioTestCase):
             "/api/proxy-accounts/" + self.second + "/activate",
             json={"model": proxy.excel_upstream.MODEL_ID},
         )
+
+    async def test_json_import_can_use_existing_activation_flow(self):
+        token = credential("account-imported")
+        response = await self.client.post(
+            "/api/proxy-accounts/import",
+            json={
+                "accounts": [
+                    {"platform": "openai", "type": "oauth", "credentials": token}
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        for secret in token.values():
+            self.assertNotIn(secret, response.text)
+        imported = response.json()["imported_ids"][0]
+        self.assertEqual(self.store.snapshot()["active_id"], self.first)
+        self.config.assert_not_called()
+        self.balance.assert_not_called()
+        with patch.object(
+            proxy.account_route_dependencies,
+            "dispatch_response",
+            new_callable=AsyncMock,
+            return_value=JSONResponse(
+                {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "OK"}],
+                        }
+                    ],
+                }
+            ),
+        ) as send:
+            response = await self.client.post(
+                f"/api/proxy-accounts/{imported}/activate",
+                json={"model": proxy.excel_upstream.MODEL_ID},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.store.snapshot()["active_id"], imported)
+        self.assertEqual(
+            send.call_args.kwargs["session_headers"]["authorization"],
+            "Bearer " + token["access_token"],
+        )
+        self.config.assert_called_once_with("codex")
+        self.assertEqual(
+            self.balance.call_args.args[0]["access_token"], token["access_token"]
+        )
+        self.assertNotIn("refresh_token", self.balance.call_args.args[0])
+
+    async def test_json_import_rejects_unsafe_or_invalid_requests(self):
+        previous = self.store.snapshot()
+        for kwargs, status in (
+            ({"json": credential(), "headers": {"origin": "https://example.com"}}, 403),
+            ({"content": "{}", "headers": {"content-type": "text/plain"}}, 415),
+            ({"content": "{", "headers": {"content-type": "application/json"}}, 400),
+            (
+                {
+                    "content": b" " * (1024 * 1024 + 1),
+                    "headers": {"content-type": "application/json"},
+                },
+                413,
+            ),
+            ({"json": {"accounts": [credential("account-c"), {}]}}, 400),
+        ):
+            response = await self.client.post("/api/proxy-accounts/import", **kwargs)
+            self.assertEqual(response.status_code, status, response.text)
+            self.assertEqual(self.store.snapshot(), previous)
+
+    async def test_json_import_is_blocked_during_activation(self):
+        previous = self.store.snapshot()
+        async with proxy._proxy_activation_lock:
+            response = await self.client.post(
+                "/api/proxy-accounts/import", json={"tokens": credential("account-c")}
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.snapshot(), previous)
 
     async def test_activation_verifies_candidate_then_enables_config(self):
         completed = {
