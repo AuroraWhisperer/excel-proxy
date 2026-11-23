@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import excel_upstream
 import excel_tool_transport
-import excel_input
 import excel_tool_history
 import test_excel_call_diagnostics
 import test_excel_contracts
@@ -192,7 +191,7 @@ class RawTransportTests(unittest.TestCase):
         valid = raw_call("exec_command", "cmd", COMMAND)
         invalid = raw_call("exec_command", "cmd", COMMAND, {"undeclared": True})
         invalid.update(id="fc_bad", call_id="call_bad")
-        with patch.object(excel_tool_transport, "_remember_native_calls") as remember:
+        with patch.object(excel_tool_history, "remember_native_calls") as remember:
             self.assertIsNone(
                 excel_upstream.extract_native_client_tool_calls(
                     {"output": [valid, invalid]},
@@ -201,7 +200,7 @@ class RawTransportTests(unittest.TestCase):
             )
         remember.assert_not_called()
 
-    def test_native_raw_identity_replays_after_memory_reset(self):
+    def test_legacy_raw_calls_rebuild_as_history_after_memory_reset(self):
         for tool, field, text in (
             (FUNCTION_TOOL, "cmd", COMMAND),
             (CUSTOM_TOOL, "input", PATCH_TEXT),
@@ -215,11 +214,13 @@ class RawTransportTests(unittest.TestCase):
                 self.assertIsNotNone(call)
                 with excel_tool_history._native_call_cache_lock:
                     excel_tool_history._native_call_cache.clear()
+                rebuilt = excel_upstream.translate_input_items([call])[0]
+                self.assertEqual(rebuilt["call_id"], native["call_id"])
                 self.assertEqual(
-                    excel_upstream.translate_input_items(
-                        [call], {tool["name"]: tool["type"]}
-                    ),
-                    [native],
+                    json.loads(json.loads(rebuilt["arguments"])["code"]),
+                    {"name": tool["name"], "input": text}
+                    if field == "input"
+                    else {"name": tool["name"], "arguments": {field: text}},
                 )
                 changed = dict(call)
                 if field == "input":
@@ -227,51 +228,38 @@ class RawTransportTests(unittest.TestCase):
                 else:
                     changed["arguments"] = json.dumps({field: text + "changed"})
                 self.assertNotEqual(
-                    excel_upstream.translate_input_items([changed]), [native]
+                    excel_upstream.translate_input_items([changed]), [rebuilt]
                 )
 
-    def test_prompt_advertises_only_eligible_raw_tools_and_keeps_json_fallback(self):
+    def test_prompt_advertises_function_envelopes_and_custom_raw_input(self):
         source = {
             "tools": [FUNCTION_TOOL, CUSTOM_TOOL, {"type": "function", "name": "other"}]
         }
         instructions = excel_upstream._client_tool_protocol_instructions(source)
-        self.assertIn("excel-proxy.raw/", instructions)
+        self.assertNotIn("excel-proxy.raw/", instructions)
+        self.assertIn("codex2api.custom/apply_patch", instructions)
         self.assertIn("extended_summary", instructions)
-        self.assertIn("JSON-envelope", instructions)
-        self.assertIn(
-            "excel-proxy.raw/", excel_upstream._client_tool_protocol_reminder(source)
-        )
+        self.assertIn("FUNCTION uses a JSON envelope", instructions)
+        self.assertEqual(excel_upstream._client_tool_protocol_reminder(source), "")
 
-    def test_all_protocol_prompts_prefer_raw_before_json_envelopes(self):
+    def test_initial_and_repair_prompts_use_the_reference_transport(self):
         source = {"tools": [FUNCTION_TOOL, CUSTOM_TOOL, CODE_TOOL]}
         prompts = {
             "initial": excel_upstream._client_tool_protocol_instructions(source),
-            "reminder": excel_upstream._client_tool_protocol_reminder(source),
             "repair": excel_upstream._TRANSPORT_RETRY_GUIDANCE,
         }
         for label, prompt in prompts.items():
             with self.subTest(prompt=label):
-                rule = (
-                    "Use raw mode whenever the chosen catalog tool declares raw_fields"
-                )
-                self.assertIn(rule, prompt)
-                self.assertLess(prompt.index(rule), prompt.index("JSON-envelope"))
-                self.assertIn("excel-proxy.raw/FIELD/TOOL_NAME", prompt)
-                self.assertIn("extended_summary", prompt)
-                self.assertIn("outer function-call arguments", prompt)
-                self.assertNotIn("By default put", prompt)
-                self.assertNotIn("by default, the inner code value is JSON", prompt)
-                self.assertNotIn(
-                    '{"name":"exec_command","arguments":{"cmd":"pwd"}}', prompt
-                )
-        self.assertIn(
-            "summary=excel-proxy.raw/input/apply_patch with code=the complete raw patch",
-            prompts["reminder"],
-        )
+                self.assertIn("FUNCTION", prompt)
+                self.assertIn("JSON object", prompt)
+                self.assertIn("CUSTOM", prompt)
+                self.assertIn("codex2api.custom/CATALOG_NAME", prompt)
+                self.assertNotIn("excel-proxy.raw/", prompt)
+                self.assertNotIn("raw_fields", prompt)
 
 
 class RawHistoryTests(unittest.TestCase):
-    def test_rebuilt_history_uses_catalog_raw_format_and_preserves_results(self):
+    def test_rebuilt_history_uses_reference_envelopes_and_preserves_results(self):
         cases = [
             (FUNCTION_TOOL, "cmd", COMMAND, {}),
             (
@@ -318,7 +306,7 @@ class RawHistoryTests(unittest.TestCase):
                     }
                     before = copy.deepcopy(source)
                     with patch.object(
-                        excel_input, "_remembered_native_calls", return_value={}
+                        excel_tool_history, "remembered_native_calls", side_effect=AssertionError("cache read")
                     ):
                         body = excel_upstream.prepare_responses_body(source)
                         self.assertEqual(
@@ -327,9 +315,13 @@ class RawHistoryTests(unittest.TestCase):
                     native, replay_output = body["input"][-2:]
                     args = json.loads(native["arguments"])
                     name = f"{namespace}.{tool['name']}" if namespace else tool["name"]
-                    self.assertEqual(args["summary"], f"excel-proxy.raw/{field}/{name}")
-                    self.assertEqual(args["code"], text)
-                    self.assertEqual(json.loads(args["extended_summary"]), metadata)
+                    self.assertEqual(args["summary"], "Replay a previously requested client tool")
+                    self.assertEqual(
+                        json.loads(args["code"]),
+                        {"name": name, "input": text}
+                        if field == "input"
+                        else {"name": name, "arguments": {field: text, **metadata}},
+                    )
                     restored = excel_upstream.extract_native_client_tool_call(
                         {"output": [native]},
                         source,
@@ -350,7 +342,7 @@ class RawHistoryTests(unittest.TestCase):
                     self.assertEqual(replay_output["output"], output["output"])
                     self.assertEqual(source, before)
 
-    def test_cached_native_calls_stay_verbatim_with_raw_catalog(self):
+    def test_cached_native_calls_cannot_replace_supplied_history(self):
         for native in (
             transport({"name": "exec_command", "arguments": {"cmd": COMMAND}}),
             raw_call("exec_command", "cmd", COMMAND),
@@ -368,12 +360,17 @@ class RawHistoryTests(unittest.TestCase):
                     "input": [call],
                 }
                 with patch.object(
-                    excel_input,
-                    "_remembered_native_calls",
+                    excel_tool_history,
+                    "remembered_native_calls",
                     return_value={call["call_id"]: native},
-                ):
+                ) as read_cache:
                     body = excel_upstream.prepare_responses_body(source)
-                self.assertEqual(body["input"][-1], native)
+                read_cache.assert_not_called()
+                self.assertNotIn("provider_extension", body["input"][-1])
+                self.assertEqual(
+                    json.loads(json.loads(body["input"][-1]["arguments"])["code"]),
+                    {"name": "exec_command", "arguments": {"cmd": COMMAND}},
+                )
 
     def test_rebuilt_history_does_not_infer_raw_fields_without_current_schema(self):
         call = {
@@ -395,7 +392,7 @@ class RawHistoryTests(unittest.TestCase):
                     "input": [call],
                 }
                 with patch.object(
-                    excel_input, "_remembered_native_calls", return_value={}
+                    excel_tool_history, "remembered_native_calls", side_effect=AssertionError("cache read")
                 ):
                     body = excel_upstream.prepare_responses_body(source)
                 args = json.loads(body["input"][-1]["arguments"])
@@ -405,7 +402,7 @@ class RawHistoryTests(unittest.TestCase):
                     {"name": "exec_command", "arguments": {"cmd": COMMAND}},
                 )
 
-    def test_catalog_gives_exact_raw_markers_that_round_trip(self):
+    def test_catalog_custom_markers_and_function_envelopes_round_trip(self):
         source = {
             "tools": [
                 {
@@ -416,23 +413,19 @@ class RawHistoryTests(unittest.TestCase):
             ]
         }
         instructions = excel_upstream._client_tool_protocol_instructions(source)
-        catalog, _ = json.JSONDecoder().raw_decode(
-            instructions.split("Available client tools:\n", 1)[1]
-        )
         for entry, field, text in zip(
-            catalog,
+            source["tools"][0]["tools"],
             ["cmd", "code", "input"],
             [COMMAND, 'console.log("quoted");', PATCH_TEXT],
         ):
             with self.subTest(name=entry["name"]):
-                recipe = entry["transport"]
-                self.assertEqual(recipe["mode"], "raw")
-                self.assertEqual(recipe["field"], field)
+                name = "functions." + entry["name"]
+                self.assertIn(f'Client tool "{name}"', instructions)
                 native = transport({})
                 native["arguments"] = json.dumps(
                     {
-                        "summary": recipe["summary"],
-                        "code": text,
+                        "summary": "codex2api.custom/" + name if field == "input" else "Run client tool",
+                        "code": text if field == "input" else json.dumps({"name": name, "arguments": {field: text}}),
                         "extended_summary": "{}",
                     }
                 )
@@ -440,7 +433,7 @@ class RawHistoryTests(unittest.TestCase):
                     {"output": [native]}, source, remember=False
                 )
                 self.assertIsNotNone(call)
-                self.assertEqual(call["namespace"] + "." + call["name"], entry["name"])
+                self.assertEqual(call["namespace"] + "." + call["name"], name)
                 self.assertEqual(
                     call["input"]
                     if field == "input"
@@ -544,8 +537,11 @@ class RawRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         json.loads(calls[0]["arguments"]), {"cmd": command}
                     )
+                    rebuilt = excel_upstream.translate_input_items(calls)[0]
+                    self.assertEqual(rebuilt["id"], native["id"])
                     self.assertEqual(
-                        excel_upstream.translate_input_items(calls), [native]
+                        json.loads(json.loads(rebuilt["arguments"])["code"]),
+                        {"name": "exec_command", "arguments": {"cmd": command}},
                     )
 
     async def test_lossless_recovery_for_json_and_streaming_clients(self):
@@ -595,7 +591,7 @@ class RawRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                     ]
                 )
                 with patch.object(
-                    excel_tool_transport, "_remember_native_calls"
+                        excel_tool_history, "remember_native_calls"
                 ) as remember:
                     result = await self.request(stream)
                 remember.assert_not_called()
@@ -657,8 +653,14 @@ class RawRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                     [json.loads(call["arguments"])["cmd"] for call in calls],
                     ["echo sibling", COMMAND],
                 )
+                rebuilt = excel_upstream.translate_input_items(calls)
+                self.assertEqual([item["id"] for item in rebuilt], [good["id"], corrected["id"]])
                 self.assertEqual(
-                    excel_upstream.translate_input_items(calls), [good, corrected]
+                    [json.loads(json.loads(item["arguments"])["code"]) for item in rebuilt],
+                    [
+                        {"name": "exec_command", "arguments": {"cmd": "echo sibling"}},
+                        {"name": "exec_command", "arguments": {"cmd": COMMAND}},
+                    ],
                 )
                 recovery = self.finish.call_args.args[0].trace_context[
                     "tool_call_recovery"

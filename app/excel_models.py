@@ -1,8 +1,5 @@
 """Shared Excel model catalog; independent of sessions and request translation."""
 
-import os
-
-
 EXCEL_MODEL_UPSTREAMS = {
     "gpt-6-astra-excel": "gpt-6-astra",
     "gpt-5.6-luna-excel": "gpt-5.6-luna",
@@ -14,16 +11,20 @@ EXCEL_MODEL_UPSTREAMS = {
 MODEL_IDS = tuple(EXCEL_MODEL_UPSTREAMS)
 MODEL_ID = "gpt-5.6-sol-excel"
 ASTRA_COMPACTION_TOKEN_LIMIT = 258_000
-_UPSTREAM_MODEL_OVERRIDE = os.environ.get("GHCP_EXCEL_UPSTREAM_MODEL", "").strip()
-UPSTREAM_MODEL = _UPSTREAM_MODEL_OVERRIDE or EXCEL_MODEL_UPSTREAMS[MODEL_ID]
+UPSTREAM_MODEL = EXCEL_MODEL_UPSTREAMS[MODEL_ID]
 EXCEL_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 EXCEL_MODEL_REASONING_EFFORTS = {
-    "gpt-6-astra-excel": ("medium", "high", "xhigh"),
+    "gpt-6-astra-excel": EXCEL_REASONING_EFFORTS,
 }
 _REASONING_EFFORT_ALIASES = {
+    "": "medium",
+    "none": "low",
+    "minimal": "low",
     "x-high": "xhigh",
     "extra-high": "xhigh",
     "extra_high": "xhigh",
+    "max": "xhigh",
+    "ultra": "xhigh",
 }
 
 
@@ -81,7 +82,7 @@ def excel_model_id(model: object) -> str | None:
 
 def upstream_model_for(model: object) -> str:
     model_id = excel_model_id(model) or MODEL_ID
-    return _UPSTREAM_MODEL_OVERRIDE or EXCEL_MODEL_UPSTREAMS[model_id]
+    return EXCEL_MODEL_UPSTREAMS[model_id]
 
 
 def normalize_reasoning_effort(value: object, model: object = None) -> str | None:

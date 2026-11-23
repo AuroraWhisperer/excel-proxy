@@ -15,6 +15,7 @@ import httpx
 from fastapi import Request
 
 import codex_agent_compat
+from upstream_errors import retry_after_headers
 import usage_records
 from constants import (
     TOKEN_DIR,
@@ -904,13 +905,15 @@ class UsageTracker:
                 "x-ratelimit-reset",
                 "x-ratelimit-used",
                 "x-ratelimit-resource",
-                "retry-after",
             ):
                 header_value = upstream.headers.get(header_name)
                 if header_value is None:
                     continue
                 short_key = header_name.replace("x-ratelimit-", "").replace("-", "_")
                 rate_limit_fields[short_key] = header_value
+            retry_after = retry_after_headers(upstream.headers)
+            if retry_after:
+                rate_limit_fields["retry_after"] = retry_after["retry-after"]
             if rate_limit_fields:
                 finished_event["rate_limit"] = rate_limit_fields
 

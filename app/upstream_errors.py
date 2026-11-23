@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
 import re
+import ssl
 from typing import Any, Sequence
 
 import httpx
@@ -11,10 +15,38 @@ import httpx
 class ExcelResponseError(httpx.RemoteProtocolError):
     """A locally detected response-contract failure with a client-safe reason."""
 
-    def __init__(self, code: str, message: str, *, status_code: int = 502):
+    def __init__(self, code: str, message: str, *, status_code: int = 502, headers=None):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.headers = headers
+
+
+def retry_after_headers(headers: httpx.Headers) -> dict[str, str]:
+    """Expose only a delay in seconds, capped at one week."""
+    value = headers.get("retry-after", "").strip()
+    if not value or len(value) > 128:
+        return {}
+    if value.isascii() and value.isdecimal():
+        seconds = int(value)
+    else:
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                return {}
+            seconds = math.ceil((date - datetime.now(timezone.utc)).total_seconds())
+        except (ValueError, OverflowError, TypeError):
+            return {}
+    return {"retry-after": str(max(0, min(seconds, 604800)))}
+
+
+def certificate_verification_failed(exc: BaseException) -> bool:
+    """httpx and httpcore wrap TLS verification failures in ConnectError."""
+    while exc is not None:
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def diagnose_failure(
@@ -34,15 +66,21 @@ def diagnose_failure(
     elif status_code == 401 or code == "excel_auth_required":
         category, action = (
             "authentication",
-            "Sign in again to the selected connection account, or refresh the selected Excel add-in session.",
+            "Sign in again to the selected connection account.",
         )
     elif status_code == 403 or code in {
         "excel_access_denied",
         "basispoints_model_access_changed",
+        "request_rejected",
     }:
         category, action = (
             "permission",
             "Check account and model access; retrying unchanged will not fix permission.",
+        )
+    elif code in {"excel_queue_full", "excel_queue_timeout"}:
+        category, action = (
+            "local_capacity",
+            "Wait for an active local generation to finish, then try again.",
         )
     elif status_code == 429 or code == "excel_rate_limited":
         category, action = (
@@ -152,7 +190,7 @@ def excel_error_payload(status_code: int, payload: Any = None) -> dict:
     code, message = {
         401: (
             "excel_auth_required",
-            "Sign in again to the selected connection account, or refresh the selected Excel add-in session.",
+            "Sign in again to the selected connection account.",
         ),
         403: (
             "excel_access_denied",
@@ -173,6 +211,11 @@ def excel_error_payload(status_code: int, payload: Any = None) -> dict:
         code, message = (
             upstream_code,
             "This model is not available on the account's Excel endpoint.",
+        )
+    elif upstream_code == "request_rejected":
+        code, message = (
+            upstream_code,
+            "The Excel/BPS endpoint rejected this request or account authorization.",
         )
     return {
         "error": {

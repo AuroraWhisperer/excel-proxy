@@ -192,7 +192,10 @@ class AccountRouterBoundaryTests(unittest.TestCase):
         keys = route_keys(router)
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn(("/api/proxy-accounts/{record_id}/activate", "POST"), keys)
-        self.assertIn(("/api/config/excel-session", "DELETE"), keys)
+        self.assertIn(("/api/config/excel-session", "GET"), keys)
+        self.assertIn(("/api/config/excel-session/test", "POST"), keys)
+        self.assertNotIn(("/api/config/excel-session", "POST"), keys)
+        self.assertNotIn(("/api/config/excel-session", "DELETE"), keys)
         self.assertTrue(
             {"proxy", "excel_upstream"}.isdisjoint(imported_modules("account_routes"))
         )

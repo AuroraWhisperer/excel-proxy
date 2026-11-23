@@ -343,7 +343,7 @@ class ExcelContinuityTests(unittest.TestCase):
         prepared = excel_upstream.prepare_responses_body({"input": history})
         rendered = json.dumps(prepared["input"])
         self.assertIn(summary, rendered)
-        self.assertNotIn("old details", rendered)
+        self.assertIn("old details", rendered)
         self.assertNotIn(compact["encrypted_content"], rendered)
 
     def test_failed_or_empty_compaction_does_not_discard_history(self):
@@ -436,20 +436,9 @@ class ExcelContinuityTests(unittest.TestCase):
                         proxy, "_get_excel_upstream_client", return_value=remote
                     ),
                     patch.object(
-                        proxy.excel_session_capture, "refresh_macos_excel_session"
-                    ),
-                    patch.object(
-                        proxy.excel_session_capture, "refresh_windows_excel_session"
-                    ),
-                    patch.object(
-                        excel_upstream.excel_session_store,
-                        "request_headers",
-                        return_value={},
-                    ),
-                    patch.object(
-                        excel_upstream.excel_session_store,
-                        "tools_version_id",
-                        return_value=None,
+                        proxy,
+                        "_selected_excel_headers",
+                        new=AsyncMock(return_value={}),
                     ),
                 ):
                     body = {
@@ -500,10 +489,12 @@ class ExcelContinuityTests(unittest.TestCase):
                     self.assertEqual(
                         seen[0]["metadata"]["task_id"], seen[2]["metadata"]["task_id"]
                     )
+                    self.assertEqual(len({item["metadata"]["turn_id"] for item in seen}), 3)
+                    self.assertTrue(all(item["model"] == "gpt-5.6-sol" for item in seen))
 
         asyncio.run(run())
 
-    def test_turn_identity_ignores_changing_client_metadata(self):
+    def test_client_metadata_does_not_set_prepared_routing_identity(self):
         source = {
             "input": [
                 {
@@ -521,19 +512,17 @@ class ExcelContinuityTests(unittest.TestCase):
             "turn_id": "first",
             "executed_tools": ["read_file"],
         }
-        source["input"].append(
-            {"type": "function_call_output", "call_id": "call_result", "output": "done"}
-        )
+        source["input"].extend([
+            {"type": "function_call", "call_id": "call_result", "name": "read_file", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_result", "output": "done"},
+        ])
         continued = excel_upstream.prepare_responses_body(source)
-        self.assertEqual(
-            initial["metadata"]["turn_id"], continued["metadata"]["turn_id"]
-        )
-        self.assertEqual(
-            initial["metadata"]["task_id"], continued["metadata"]["task_id"]
-        )
-        self.assertEqual(continued["metadata"]["agent_iteration"], "2")
+        self.assertEqual(initial["metadata"], {"agent_iteration": "1"})
+        self.assertEqual(continued["metadata"], {"agent_iteration": "2"})
+        self.assertEqual(continued["input"][:len(initial["input"])], initial["input"])
+        self.assertEqual(continued["input"][-1]["call_id"], "call_result")
 
-    def test_600_calls_replay_exactly_after_eviction_and_memory_reset(self):
+    def test_600_calls_rebuild_from_complete_history_after_memory_reset(self):
         native_items = [native_call(index) for index in range(600)]
         client_items = []
         for item in native_items:
@@ -544,13 +533,19 @@ class ExcelContinuityTests(unittest.TestCase):
             client_items.append(call)
         snapshot = copy.deepcopy(client_items)
         self.assertLessEqual(len(excel_tool_history._native_call_cache), 512)
+        rebuilt = excel_upstream.translate_input_items(client_items)
         self.assertEqual(
-            excel_upstream.translate_input_items(client_items), native_items
+            [item["id"] for item in rebuilt], [item["id"] for item in native_items]
         )
+        for original, item in zip(native_items, rebuilt):
+            self.assertEqual(
+                json.loads(json.loads(original["arguments"])["code"]),
+                json.loads(json.loads(item["arguments"])["code"]),
+            )
         with excel_tool_history._native_call_cache_lock:
             excel_tool_history._native_call_cache.clear()
         self.assertEqual(
-            excel_upstream.translate_input_items(client_items), native_items
+            excel_upstream.translate_input_items(client_items), rebuilt
         )
         self.assertEqual(client_items, snapshot)
         code = (
@@ -567,7 +562,7 @@ class ExcelContinuityTests(unittest.TestCase):
             timeout=30,
         )
         expected = hashlib.sha256(
-            json.dumps(native_items, sort_keys=True).encode()
+            json.dumps(rebuilt, sort_keys=True).encode()
         ).hexdigest()
         self.assertEqual(process.stdout.strip(), expected)
 

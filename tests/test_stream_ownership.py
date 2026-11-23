@@ -95,6 +95,16 @@ class StreamOwnershipTests(unittest.IsolatedAsyncioTestCase):
             error.exception.results[0]["blocked_reason"], "teardown_timeout"
         )
 
+    async def test_same_lineage_cannot_cancel_another_account_or_workspace_member(self):
+        old = plan("old")
+        old.headers.update({"chatgpt-account-id": "workspace", "x-openai-account-user-id": "alice"})
+        task, _ = await self.prior_stream(old, [])
+        for account, user in (("workspace", "bob"), ("other", "alice")):
+            new = plan("new")
+            new.headers.update({"chatgpt-account-id": account, "x-openai-account-user-id": user})
+            self.assertEqual(await streams._supersede_active_responses_streams(new), [])
+            self.assertFalse(task.done())
+
     async def test_finished_unconfirmed_entry_does_not_block_future_retry(self):
         entry = streams._register_active_responses_stream(plan("old"))
         streams._complete_active_responses_teardown(

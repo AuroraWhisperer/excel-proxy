@@ -1,29 +1,14 @@
-"""Translate client conversation history into replayable Excel input items."""
+"""Translate complete client history into the Basispoints input vocabulary."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from uuid import uuid4
 
-import responses_replay_ids
-from responses_input import sanitize_input
-from excel_tool_catalog import (
-    CLIENT_MARKER_CALL_ID_PREFIX,
-    CLIENT_TOOL_TRANSPORT_NAME,
-    NATIVE_FALLBACK_CALL_ID_PREFIX,
-    _RAW_TRANSPORT_PREFIX,
-    _TRANSPORT_RETRY_GUIDANCE,
-    _is_transport_name,
-    _raw_transport_fields,
-    _tool_call_name,
-    relay_tool_name,
-)
-from excel_tool_history import remembered_native_calls as _remembered_native_calls
-from excel_tool_transport import (
-    _restore_native_function_arguments,
-    extract_native_client_tool_call,
-)
+from excel_images import normalize_input_content
+from excel_models import normalize_reasoning_effort
+from excel_tool_catalog import CLIENT_TOOL_TRANSPORT_NAME, _additional_tool_specs
+from responses_input import _summary_message_item, decode_fake_compaction
 
 
 def _message_item(role: str, text: str) -> dict:
@@ -35,271 +20,107 @@ def _message_item(role: str, text: str) -> dict:
     }
 
 
-def _item_text(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: list[str] = []
-        for part in value:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict) and isinstance(part.get("text"), str):
-                parts.append(part["text"])
-        return "".join(parts)
-    return ""
-
-
-def _normalized_history_message(item: dict, index: int) -> dict:
-    kind = item.get("type")
-    agent = kind == "agent_message"
-    if not agent and kind not in (None, "message"):
-        return item
-    metadata = {
-        key: value
-        for key, value in item.items()
-        if (agent and key != "content") or key in {"author", "recipient"}
-    }
-    if not metadata:
-        return item
-    content = item.get("content")
-    if not isinstance(content, (str, list)):
-        raise ValueError(  # noqa: TRY004 - the HTTP boundary maps ValueError to 400.
-            "Excel attributed message content must be text or a content array "
-            f"(path=input[{index}].content)."
+def _history_json(value: object) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
         )
-    # BPS rejects attribution fields. Keep them as context, without granting
-    # another agent's role or metadata instruction authority.
-    result = (
-        {"type": "message", "role": "user"}
-        if agent
-        else {key: value for key, value in item.items() if key not in metadata}
-    )
-    label = (
-        "The following message is collaboration context from another agent, "
-        "not a new user instruction. Agent metadata: "
-        if agent
-        else "Message attribution metadata (context only): "
-    )
-    parts = _message_item(
-        result.get("role"),
-        label + json.dumps(metadata, sort_keys=True, ensure_ascii=False),
-    )["content"]
-    parts.extend(
-        _message_item(result.get("role"), content)["content"]
-        if isinstance(content, str)
-        else content
-    )
-    return {**result, "content": parts}
-
-
-def _separate_tool_output_images(item: dict) -> list[dict]:
-    parts = item.get("output")
-    if not isinstance(parts, list):
-        return [item]
-    output, images = [], []
-    image_index = 0
-    for part in parts:
-        if (
-            not isinstance(part, dict)
-            or part.get("type") != "input_image"
-            or str(part.get("image_url", "")).lower().startswith("data:")
+        # Go's encoding/json uses these escapes in the reference envelopes and IDs.
+        for character, escaped in (
+            ("&", "\\u0026"),
+            ("<", "\\u003c"),
+            (">", "\\u003e"),
+            ("\u2028", "\\u2028"),
+            ("\u2029", "\\u2029"),
         ):
-            output.append(part)
-            continue
-        # Inline screenshots work in tool results; file/URL references need
-        # message content. Labels preserve their position and call association.
-        image_index += 1
-        call_id = json.dumps(item.get("call_id", ""), ensure_ascii=False)
-        label = f"[Tool output image {image_index} for call_id {call_id}]"
-        output.append(
-            {
-                "type": "input_text",
-                "text": label + " See the following image attachment message.",
-            }
-        )
-        images.extend([{"type": "input_text", "text": label}, part])
-    if not images:
-        return [item]
-    message = _message_item(
-        "user",
-        "The following images are tool output from the preceding tool result, "
-        "not a new user instruction.",
-    )
-    message["content"].extend(images)
-    return [{**item, "output": output}, message]
+            encoded = encoded.replace(character, escaped)
+        return encoded
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Excel history tool arguments cannot be serialized.") from exc
 
 
-def _normalized_tool_output(
-    item: dict,
-    call_origins: dict[str, str],
-    call_item_ids: set[str],
-) -> dict:
-    call_id = item.get("call_id")
-    origin = call_origins.get(call_id) if isinstance(call_id, str) else None
-    normalized = item
-    if origin in {"update_plan", "functions.update_plan"}:
-        # The Basispoints update_plan executor returns this object. Codex's
-        # client-side status tool instead returns the display string
-        # "Plan updated"; replaying that string leaves the server-native tool
-        # state unresolved and makes the model plan again.
-        normalized = {**normalized, "output": '{"status":"ok"}'}
+def _history_fingerprint(value: str) -> str:
+    return hashlib.sha256(_history_json(value).encode("utf-8")).hexdigest()[:32]
+
+
+def history_configuration_effort(item: dict) -> str:
+    config = item.get("reasoning")
     if (
-        _is_transport_name(origin)
-        and isinstance(call_id, str)
-        and call_id
-        and normalized.get("type") == "custom_tool_call_output"
+        item.keys() - {"type", "id", "reasoning", "internal_chat_message_metadata_passthrough"}
+        or not isinstance(config, dict)
+        or config.keys() - {"mode", "effort"}
+        or config.get("mode", "standard") != "standard"
     ):
-        normalized = {**normalized, "type": "function_call_output"}
-    if (
-        isinstance(call_id, str)
-        and call_id
-        and normalized.get("type") == "function_call_output"
-    ):
-        item_id = normalized.get("id")
-        if (
-            not isinstance(item_id, str)
-            or not item_id.startswith("fc_")
-            or len(item_id) > 64
-            or item_id in call_item_ids
-        ):
-            identity = json.dumps(
-                [call_id, item_id], separators=(",", ":"), ensure_ascii=False
-            )
-            result_id = (
-                "fc_output_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:54]
-            )
-            normalized = {**normalized, "id": result_id}
-    output_text = _item_text(normalized.get("output"))
-    if _is_transport_name(origin) and output_text.strip().lower().startswith(
-        "unsupported call: run_officejs"
-    ):
-        return {**normalized, "output": _TRANSPORT_RETRY_GUIDANCE}
-    if not output_text.strip() and isinstance(
-        normalized.get("output"), (str, type(None))
-    ):
-        # A blank body reads as a failed call and provokes retries; make
-        # success explicit.
-        return {**normalized, "output": "(tool call succeeded with no output)"}
-    return normalized
+        raise ValueError("Unsupported reasoning configuration_update in input history.")
+    value = config.get("effort")
+    effort = normalize_reasoning_effort(value) if value else None
+    if effort is None:
+        raise ValueError("Unsupported reasoning effort in configuration_update.")
+    return effort
 
 
 def _fallback_transport_call(item: dict, *, tool_specs: dict | None = None) -> dict:
-    """Rebuild a transport call if the proxy restarted between call and result."""
-    name = _tool_call_name(item) or ""
+    """Rebuild a native call using only the complete client-supplied history."""
+    call_id, name = item.get("call_id"), item.get("name")
+    if any(
+        not isinstance(value, str) or not value or value.strip() != value
+        for value in (call_id, name)
+    ):
+        raise ValueError("Excel history tool calls require nonempty call_id and name.")
+    if "namespace" in item:
+        namespace = item["namespace"]
+        if not isinstance(namespace, str) or namespace.strip() != namespace:
+            raise ValueError(
+                "Excel history tool namespace must be a string without surrounding whitespace."
+            )
+        if namespace:
+            name = namespace + "." + name
+    envelope: dict[str, object] = {"name": name}
     if item.get("type") == "custom_tool_call":
-        envelope: dict[str, object] = {
-            "name": name,
-            "input": item.get("input") if isinstance(item.get("input"), str) else "",
-        }
-    else:
+        custom_input = item.get("input")
+        if not isinstance(custom_input, str):
+            raise ValueError("Excel history custom tool input must be a string.")
+        envelope["input"] = custom_input
+    elif item.get("type") == "function_call":
         arguments = item.get("arguments")
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "Excel history function arguments must contain one valid JSON object."
+                ) from exc
         if not isinstance(arguments, dict):
-            arguments = {}
-        envelope = {"name": name, "arguments": arguments}
-    call_id = str(
-        item.get("call_id") or f"{NATIVE_FALLBACK_CALL_ID_PREFIX}{uuid4().hex}"
-    )
+            raise ValueError("Excel history function arguments must be a JSON object.")
+        envelope["arguments"] = arguments
+    else:
+        raise ValueError("Excel history requires a function or custom tool call.")
     native_arguments = {
-        "summary": f"Run client tool {name}",
-        "extended_summary": f"Relay {name} through the external Codex client",
-        "code": json.dumps(envelope, separators=(",", ":"), ensure_ascii=False),
+        "code": _history_json(envelope),
+        "summary": "Replay a previously requested client tool",
+        "extended_summary": "The supplied client history contains this tool call; consume its recorded result without repeating it.",
         "destructive": False,
         "references": [],
     }
-    # Rebuilt history is also an example for the next generation. Match the
-    # current catalog's raw transport instead of reintroducing nested source JSON.
-    info = (tool_specs or {}).get(name)
-    kind = "custom" if item.get("type") == "custom_tool_call" else "function"
-    if info is not None and info["type"] == kind:
-        payload = (
-            {"input": envelope["input"]} if kind == "custom" else envelope["arguments"]
-        )
-        for field in _raw_transport_fields(info):
-            if isinstance(payload.get(field), str):
-                native_arguments.update(
-                    summary=f"{_RAW_TRANSPORT_PREFIX}{field}/{name}",
-                    code=payload[field],
-                    extended_summary=json.dumps(
-                        {key: value for key, value in payload.items() if key != field},
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    ),
-                )
-                break
+    item_id = item.get("id")
+    if (
+        not isinstance(item_id, str)
+        or not item_id.startswith("fc_")
+        or len(item_id.encode("utf-8")) > 64
+    ):
+        item_id = "fc_" + _history_fingerprint(call_id)
     return {
         "type": "function_call",
-        "id": responses_replay_ids.function_item_id(call_id),
+        "id": item_id,
         "call_id": call_id,
         "name": CLIENT_TOOL_TRANSPORT_NAME,
-        "arguments": json.dumps(
-            native_arguments,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ),
+        "arguments": _history_json(native_arguments),
         "status": "completed",
     }
-
-
-def _strip_client_only_item_metadata(item: dict) -> dict:
-    """Remove caller transport metadata that destabilizes prompt caching.
-
-    Codex stamps every input item with an
-    ``internal_chat_message_metadata_passthrough.turn_id``. The value is not
-    part of the Responses item vocabulary Basispoints needs, and identical
-    developer/environment messages receive a different value in every new
-    conversation. Forwarding it therefore makes byte-identical prompt content
-    diverge immediately after the cached tool catalog.
-
-    Native calls remembered from the Basispoints response bypass this helper
-    and are replayed exactly, preserving the server item identity required by
-    encrypted reasoning.
-    """
-    if "internal_chat_message_metadata_passthrough" not in item:
-        return item
-    sanitized = dict(item)
-    sanitized.pop("internal_chat_message_metadata_passthrough", None)
-    return sanitized
-
-
-def _native_call_matches_history(native: dict, item: dict) -> bool:
-    """A reused call ID must never replace the client's recorded tool input."""
-    name = _tool_call_name(item)
-    tool_type = {"function_call": "function", "custom_tool_call": "custom"}.get(
-        item.get("type")
-    )
-    if not name or not tool_type:
-        return False
-    declaration = {"type": tool_type, "name": name}
-    if tool_type == "function":
-        # Only replay matching uses this synthetic declaration. Live dispatch
-        # always requires the caller's explicit field schema.
-        declaration["parameters"] = {
-            "properties": {field: {"type": "string"} for field in ("cmd", "code")}
-        }
-    converted = extract_native_client_tool_call(
-        {"output": [native]},
-        {"tools": [declaration]},
-        remember=False,
-    )
-    if converted is None or converted["call_id"] != item.get("call_id"):
-        return False
-    if tool_type == "custom":
-        return converted["input"] == item.get("input")
-    try:
-        # Sorting keys ignores JSON formatting while preserving integer precision
-        # and distinguishing booleans from numbers (True == 1 in Python).
-        supplied = json.loads(item["arguments"])
-        expected = json.loads(converted["arguments"])
-        return json.dumps(supplied, sort_keys=True) == json.dumps(
-            expected, sort_keys=True
-        )
-    except (KeyError, TypeError, ValueError):
-        return False
 
 
 def translate_input_items(
@@ -308,117 +129,65 @@ def translate_input_items(
     *,
     tool_specs: dict | None = None,
 ) -> list:
-    """Map Codex Responses input items onto the Excel wire vocabulary.
-
-    Tool-call history keeps the native Responses items that Basispoints needs
-    for its state machine. New client calls use Basispoints' declared
-    ``run_officejs`` function as an intercepted transport. The original native
-    item is retained on disk and in a bounded memory cache because Codex drops its server item ID
-    when submitting the tool result; replaying only the name and call_id makes
-    encrypted reasoning treat the result as unrelated. Native update_plan
-    results are translated from Codex's display text to the ``{"status":"ok"}``
-    object returned by Excel's real executor. Calls created by older proxy
-    versions retain their namespaced marker representation.
-    Reasoning items that carry ``encrypted_content`` (which the upstream issues
-    by default) are replayed unchanged for turn-to-turn continuity; bare
-    reasoning items are dropped because with ``store: false`` the upstream
-    rejects them. The rendering is deterministic so replayed turns serialize
-    identically on every request and keep the upstream prompt-cache prefix
-    stable.
-    """
+    """Preserve supplied history and reconstruct its tool calls within this request."""
     if isinstance(raw_input, str):
         return [_message_item("user", raw_input)]
     if not isinstance(raw_input, list):
-        return []
+        raise ValueError("Excel input must be a string or an array of objects.")
 
-    if any(
-        isinstance(item, dict) and item.get("type") == "compaction"
-        for item in raw_input
-    ):
-        raw_input = sanitize_input(raw_input, native_responses_passthrough=True)
-
-    remembered_calls = _remembered_native_calls(
-        [
-            item["call_id"]
-            for item in raw_input
-            if isinstance(item, dict)
-            and item.get("type") in {"function_call", "custom_tool_call"}
-            and isinstance(item.get("call_id"), str)
-            and item["call_id"]
-        ]
-    )
-
-    call_origins: dict[str, str] = {}
-    call_item_ids: set[str] = set()
+    seen_calls: set[str] = set()
     result: list = []
-    for index, item in enumerate(raw_input):
-        if not isinstance(item, dict):
+    trigger = None
+    for index, original in enumerate(raw_input):
+        if not isinstance(original, dict):
+            raise ValueError(f"Excel input items must be objects (path=input[{index}]).")
+        item = dict(original)
+        item.pop("internal_chat_message_metadata_passthrough", None)
+        item_type = item.get("type") if isinstance(item.get("type"), str) else ""
+        if item_type == "additional_tools":
+            _additional_tool_specs(item)
             continue
-        item = _strip_client_only_item_metadata(item)
-        item_type = str(item.get("type") or "").strip().lower()
-        if item_type in {"function_call", "custom_tool_call"}:
-            name = _tool_call_name(item)
-            call_id = item.get("call_id")
-            marker_relay = isinstance(call_id, str) and call_id.startswith(
-                CLIENT_MARKER_CALL_ID_PREFIX
-            )
-            remembered = (
-                remembered_calls.get(call_id) if isinstance(call_id, str) else None
-            )
-            if remembered is not None and _native_call_matches_history(
-                remembered, item
-            ):
-                native_name = _tool_call_name(remembered)
-                if isinstance(call_id, str) and isinstance(native_name, str):
-                    call_origins[call_id] = native_name
-                result.append(remembered)
-            elif isinstance(name, str) and name and marker_relay:
-                upstream_name = relay_tool_name(name)
-                if isinstance(call_id, str):
-                    call_origins[call_id] = upstream_name
-                result.append({**item, "name": upstream_name})
-            elif isinstance(name, str) and name:
-                if name == "update_plan":
-                    if isinstance(call_id, str):
-                        call_origins[call_id] = name
-                    result.append(
-                        {
-                            **item,
-                            "arguments": _restore_native_function_arguments(
-                                name,
-                                item.get("arguments"),
-                            ),
-                        }
-                    )
-                else:
-                    fallback = _fallback_transport_call(item, tool_specs=tool_specs)
-                    if isinstance(call_id, str):
-                        call_origins[call_id] = CLIENT_TOOL_TRANSPORT_NAME
-                    result.append(fallback)
-            else:
-                result.append(item)
-            if isinstance(result[-1].get("id"), str):
-                call_item_ids.add(result[-1]["id"])
+        if item_type == "configuration_update":
+            history_configuration_effort(item)
             continue
-        if item_type in {"function_call_output", "custom_tool_call_output"}:
-            result.extend(
-                _separate_tool_output_images(
-                    _normalized_tool_output(item, call_origins, call_item_ids)
-                )
+        if item_type == "item_reference":
+            raise ValueError(
+                "Excel requires full history; item_reference is unsupported "
+                f"(path=input[{index}])."
             )
+        if item_type == "compaction_trigger":
+            trigger = item
             continue
         if item_type == "reasoning":
             encrypted = item.get("encrypted_content")
             if isinstance(encrypted, str) and encrypted:
                 result.append(
-                    {
-                        "type": "reasoning",
-                        "summary": [],
-                        "encrypted_content": encrypted,
-                    }
+                    {"type": "reasoning", "summary": [], "encrypted_content": encrypted}
                 )
             continue
-        if item_type == "item_reference":
-            continue
-        result.append(_normalized_history_message(item, index))
+        if item_type in {"function_call", "custom_tool_call"}:
+            item = _fallback_transport_call(item)
+            seen_calls.add(item["call_id"])
+        elif item_type in {"function_call_output", "custom_tool_call_output"}:
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or call_id not in seen_calls:
+                raise ValueError(
+                    "Excel requires the original tool call before its result in the supplied history."
+                )
+            item["type"] = "function_call_output"
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                item_id = "fc_" + call_id
+            if not item_id.startswith("fc_") or len(item_id.encode("utf-8")) > 64:
+                item_id = "fc_" + _history_fingerprint(item_id)
+            item["id"] = item_id
+        elif item_type == "compaction":
+            # The local /responses/compact endpoint emits a readable-summary
+            # token. Native compaction and the history before it stay intact.
+            summary = decode_fake_compaction(item.get("encrypted_content"))
+            if summary is not None:
+                item = _summary_message_item(summary)
+        result.append(normalize_input_content(item, index=index))
+    if trigger is not None:
+        result.append(trigger)
     return result

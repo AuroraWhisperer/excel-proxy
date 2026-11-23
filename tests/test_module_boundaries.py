@@ -59,16 +59,16 @@ class ModelCatalogTests(unittest.TestCase):
         for invalid in (None, {}, "gpt-excel", "gpt-6-astra"):
             self.assertFalse(self.models.is_excel_model(invalid))
 
-    def test_reasoning_normalization_stays_model_specific(self):
+    def test_reasoning_normalization_matches_bps_models(self):
         for alias in ("xhigh", "x-high", "extra-high", "extra_high", " XHIGH "):
             self.assertEqual(self.models.normalize_reasoning_effort(alias), "xhigh")
-        self.assertIsNone(
-            self.models.normalize_reasoning_effort("low", "gpt-6-astra-excel")
+        self.assertEqual(
+            self.models.normalize_reasoning_effort("low", "gpt-6-astra-excel"), "low"
         )
         self.assertEqual(
             self.models.normalize_reasoning_effort("low", "gpt-5.6-sol-excel"), "low"
         )
-        for invalid in (None, 123, "max"):
+        for invalid in (None, 123, "unsupported"):
             self.assertIsNone(self.models.normalize_reasoning_effort(invalid))
 
     def test_upstream_keeps_compatible_public_catalog_exports(self):
@@ -89,15 +89,16 @@ class ModelCatalogTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIs(getattr(excel_upstream, name), getattr(self.models, name))
 
-    def test_model_override_does_not_load_upstream_or_credentials(self):
+    def test_model_selection_ignores_override_without_loading_credentials(self):
         code = (
             "import json, sys; import excel_models as models; "
             "print(json.dumps([models.upstream_model_for('gpt-6-astra-excel'), "
+            "models.upstream_model_for('gpt-5.6-luna-excel'), "
             "models.UPSTREAM_MODEL, sorted(sys.modules)]))"
         )
         environment = {
             **os.environ,
-            "GHCP_EXCEL_UPSTREAM_MODEL": " test-override ",
+            "GHCP_EXCEL_UPSTREAM_MODEL": " gpt-5.6-luna ",
             "PYTHONPATH": str(APP),
         }
         result = subprocess.run(
@@ -107,8 +108,11 @@ class ModelCatalogTests(unittest.TestCase):
             text=True,
             check=True,
         )
-        selected, default, modules = json.loads(result.stdout)
-        self.assertEqual((selected, default), ("test-override", "test-override"))
+        astra, luna, default, modules = json.loads(result.stdout)
+        self.assertEqual(
+            (astra, luna, default),
+            ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol"),
+        )
         self.assertTrue(
             {"excel_upstream", "account_balances", "windows_dpapi", "util"}.isdisjoint(
                 modules
@@ -398,16 +402,18 @@ class ModuleBoundaryTests(unittest.TestCase):
 
     def test_proxy_wires_shared_client_and_response_owner(self):
         import excel_responses
+        import excel_websocket
         import proxy
         import upstream_client
 
         self.assertIs(
-            proxy._get_excel_upstream_client, upstream_client.get_excel_upstream_client
+            proxy._get_excel_upstream_client.func, upstream_client.get_excel_upstream_client
         )
+        self.assertEqual(proxy._get_excel_upstream_client.keywords, {"mounts_for": excel_websocket.websocket_mounts})
         processor = proxy._excel_response_processor()
         self.assertIsInstance(processor, excel_responses.ExcelResponseProcessor)
         self.assertIs(
-            processor.get_upstream_client, upstream_client.get_excel_upstream_client
+            processor.get_upstream_client, proxy._get_excel_upstream_client
         )
         self.assertIs(processor.usage_tracker, proxy.usage_tracker)
 
@@ -480,8 +486,7 @@ class AccountAndSessionBoundaryTests(unittest.TestCase):
         sessions = importlib.import_module("excel_session")
         self.assertIs(account_balances.BalanceError, identity.BalanceError)
         self.assertIs(proxy_accounts.BalanceError, identity.BalanceError)
-        self.assertIs(excel_upstream.ExcelSessionStore, sessions.ExcelSessionStore)
-        self.assertIs(excel_upstream.excel_session_store, sessions.excel_session_store)
+        self.assertIs(excel_upstream.RESPONSES_URL, sessions.RESPONSES_URL)
         self.assertIs(account_balances._normalize_account, identity.normalize_account)
 
     def test_session_import_does_not_load_request_processing(self):

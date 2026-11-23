@@ -114,6 +114,10 @@ def _latest_compaction_window(input_items):
             continue
         role = str(item.get("role", "")).lower()
         item_type = str(item.get("type", "")).lower()
+        # Later calls can still depend on catalog and reasoning updates made before compaction.
+        if item_type in {"additional_tools", "configuration_update"}:
+            preserved_pre.append(item)
+            continue
         if role in {"developer", "system"} or item_type in {"developer", "system"}:
             preserved_pre.append(item)
             continue

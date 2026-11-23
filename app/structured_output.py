@@ -21,7 +21,7 @@ def request_format(body):
     if not isinstance(fmt, dict):
         raise ValueError("text.format must be an object.")
     kind = fmt.get("type")
-    if kind in (None, "text"):
+    if kind == "text":
         return None
     allowed = (
         {"type", "name", "schema", "strict", "description"}
@@ -77,13 +77,23 @@ def request_format(body):
 
 
 def instructions(fmt):
-    return (
-        "The client requires a structured final answer. Return exactly one JSON object, "
-        "without Markdown fences or surrounding prose, matching this output format. "
-        "The proxy validates the final JSON before delivering it. Tool calls and explicit "
-        "refusals remain separate protocol items; use client tools as needed before the final answer.\n"
-        + json.dumps(fmt, ensure_ascii=False, separators=(",", ":"))
+    prompt = (
+        "The client requires a structured final answer. Your final assistant answer must be exactly one JSON value, with no Markdown fences or surrounding prose. "
+        "Tool calls and refusals remain separate protocol items; use the client tool transport as needed before the final answer. "
+        "The gateway validates the final JSON before returning it to the client."
     )
+    if fmt["type"] == "json_schema":
+        encoded = json.dumps(
+            fmt, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        # Match the reference's encoding/json representation inside the prompt.
+        for character, escaped in (
+            ("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
+            ("\u2028", "\\u2028"), ("\u2029", "\\u2029"),
+        ):
+            encoded = encoded.replace(character, escaped)
+        prompt += " The final answer must satisfy the schema in this output format: \n" + encoded
+    return prompt
 
 
 def validate_response(response, fmt):

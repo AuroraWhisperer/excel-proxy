@@ -48,10 +48,7 @@ class ProxyEnvironmentTests(unittest.TestCase):
             clear=True,
         ):
             self.assertTrue(upstream_client._upstream_proxy_configured())
-            self.assertEqual(
-                upstream_client._configured_upstream_tls_verify(True),
-                (False, "proxy_default"),
-            )
+            self.assertTrue(upstream_client._configured_upstream_tls_verify())
             self.assertEqual(
                 upstream_client._configured_upstream_http2(True),
                 (False, "proxy_default"),
@@ -67,10 +64,7 @@ class ProxyEnvironmentTests(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertEqual(
-                upstream_client._configured_upstream_tls_verify(True),
-                (True, "GHCP_UPSTREAM_TLS_VERIFY"),
-            )
+            self.assertTrue(upstream_client._configured_upstream_tls_verify())
             self.assertEqual(
                 upstream_client._configured_upstream_http2(True),
                 (True, "GHCP_UPSTREAM_HTTP2"),

@@ -8,7 +8,6 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import ProxyHandler, build_opener
 
 import httpx
 
@@ -19,22 +18,29 @@ import proxy
 
 
 class AccountLoginTests(unittest.TestCase):
+    CREDS = "example@example.com----example----JBSWY3DPEHPK3PXP"
+
     def setUp(self):
         self.store = balances.AccountBalanceStore()
         self.service = login.AccountLoginService(self.store)
-        self.enterContext(patch.object(login, "CALLBACK_PORTS", (0,)))
-        self.browser = self.enterContext(patch.object(login, "PrivateLoginBrowser"))
-        self.browser.return_value.process.poll.return_value = None
+        self.browser = self.enterContext(patch.object(login, "AutomatedLoginBrowser"))
+        self.browser.return_value.is_alive.return_value = True
+        self.browser.return_value.callback_url = None
+        self.browser.return_value.error = None
+        self.browser.return_value.message = "正在填写账号…"
         self.addCleanup(self.service.close)
 
-    def start(self):
-        result = self.service.start()
+    def start(self, *, offline_access=False):
+        self.service.offline_access = offline_access
+        result = self.service.start(self.CREDS)
         self.query = parse_qs(urlsplit(self.browser.call_args.args[0]).query)
         self.redirect = self.query["redirect_uri"][0]
         self.host = urlsplit(self.redirect).netloc
-        self.path = "/auth/callback?" + urlencode(
+        self.callback_path = urlsplit(self.redirect).path
+        self.path = self.callback_path + "?" + urlencode(
             {"state": self.query["state"][0], "code": "test-code"}
         )
+        self.callback_url = f"https://{self.host}{self.path}"
         return result
 
     def test_pkce_and_public_status_do_not_expose_private_material(self):
@@ -48,12 +54,19 @@ class AccountLoginTests(unittest.TestCase):
         self.assertEqual(self.query["code_challenge"], [expected])
         self.assertEqual(self.query["code_challenge_method"], ["S256"])
         self.assertEqual(self.query["prompt"], ["login"])
-        self.assertEqual(urlsplit(self.redirect).hostname, "127.0.0.1")
+        self.assertEqual(self.query["client_id"], [login.bps_device_auth.CLIENT_ID])
+        self.assertEqual(self.redirect, login.bps_device_auth.BROWSER_REDIRECT_URI)
+        self.assertEqual(
+            self.browser.call_args.kwargs["callback_uri"],
+            login.bps_device_auth.BROWSER_REDIRECT_URI,
+        )
+        self.assertNotIn("offline_access", self.query["scope"][0].split())
+        self.assertIn("organization.read", self.query["scope"][0].split())
         self.assertNotIn(verifier, json.dumps(result))
         self.assertNotIn(self.query["state"][0], json.dumps(result))
         self.assertNotIn("authorize_url", result)
         with self.assertRaises(balances.BalanceError):
-            self.service.start()
+            self.service.start(self.CREDS)
         self.browser.assert_called_once()
 
     def test_bad_host_state_and_duplicate_parameters_never_exchange(self):
@@ -61,20 +74,27 @@ class AccountLoginTests(unittest.TestCase):
         with patch.object(login, "exchange_code") as exchange:
             for path, host in (
                 (self.path, "evil.example"),
-                ("/auth/callback?state=wrong&code=x", self.host),
+                (self.callback_path + "?state=wrong&code=x", self.host),
                 (self.path + "&state=duplicate", self.host),
-                ("/auth/callback?state=%E4%B8%AD&code=x", self.host),
+                (self.callback_path + "?state=%E4%B8%AD&code=x", self.host),
+                (self.path + "#fragment", self.host),
                 (self.path + "&code=duplicate", self.host),
             ):
                 self.assertEqual(self.service.complete(path, host)[0], 400)
             exchange.assert_not_called()
         self.assertEqual(self.store.snapshot()["accounts"], [])
 
-    def test_proxy_login_requests_offline_access_without_exposing_tokens(self):
-        self.service.offline_access = True
-        self.start()
-        self.assertIn("offline_access", self.query["scope"][0].split())
+    def test_automated_proxy_login_uses_bps_browser_oauth_grant(self):
+        self.start(offline_access=True)
+        scopes = self.query["scope"][0].split()
+        self.assertIn("offline_access", scopes)
+        self.assertIn("organization.read", scopes)
+        self.assertEqual(self.query["client_id"], [login.bps_device_auth.CLIENT_ID])
+        self.assertEqual(self.redirect, login.bps_device_auth.BROWSER_REDIRECT_URI)
         self.assertTrue(self.service._pending["offline_access"])
+        self.assertEqual(
+            self.service._pending["client_id"], login.bps_device_auth.CLIENT_ID
+        )
         self.assertNotIn("offline_access", self.service.snapshot())
 
     def test_success_imports_once_and_ignores_callback_replay(self):
@@ -82,8 +102,8 @@ class AccountLoginTests(unittest.TestCase):
         with patch.object(
             login, "exchange_code", return_value={"access_token": "fake-access-token"}
         ) as exchange:
-            self.assertEqual(self.service.complete(self.path, self.host)[0], 200)
-            self.assertEqual(self.service.complete(self.path, self.host)[0], 409)
+            self.assertEqual(self.service.complete_callback(self.callback_url)[0], 200)
+            self.assertEqual(self.service.complete_callback(self.callback_url)[0], 409)
         exchange.assert_called_once()
         self.assertEqual(len(self.store.snapshot()["accounts"]), 1)
         self.assertNotIn("fake-access-token", json.dumps(self.service.snapshot()))
@@ -98,7 +118,7 @@ class AccountLoginTests(unittest.TestCase):
             return {"access_token": "not-saved"}
 
         with patch.object(login, "exchange_code", side_effect=exchange):
-            self.assertEqual(self.service.complete(self.path, self.host)[0], 409)
+            self.assertEqual(self.service.complete_callback(self.callback_url)[0], 409)
         self.assertEqual(self.store.snapshot()["accounts"], [])
         self.browser.return_value.close.assert_called()
 
@@ -120,7 +140,7 @@ class AccountLoginTests(unittest.TestCase):
 
     def test_provider_denial_is_not_reflected_as_html(self):
         self.start()
-        path = "/auth/callback?" + urlencode(
+        path = self.callback_path + "?" + urlencode(
             {"state": self.query["state"][0], "error": "<script>secret</script>"}
         )
         status, message = self.service.complete(path, self.host)
@@ -128,35 +148,39 @@ class AccountLoginTests(unittest.TestCase):
         self.assertNotIn("script", message)
         self.assertEqual(self.service.snapshot()["status"], "error")
 
-    def test_callback_response_hides_code_and_releases_listener(self):
-        self.start()
+    def test_captured_callback_completes_without_opening_localhost_port(self):
+        self.start(offline_access=True)
         with patch.object(
-            login, "exchange_code", return_value={"access_token": "fake-token"}
-        ):
-            opener = build_opener(ProxyHandler({}))
-            with opener.open("http://" + self.host + self.path, timeout=3) as response:
-                self.assertEqual(response.headers["Cache-Control"], "no-store")
-                self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
-                body = response.read().decode()
-                self.assertIn("history.replaceState", body)
-                self.assertNotIn("test-code", body)
-                self.assertNotIn("fake-token", body)
-        self.service._thread.join(timeout=2)
+            login,
+            "exchange_code",
+            return_value={
+                "access_token": "fake-token",
+                "client_id": login.bps_device_auth.CLIENT_ID,
+            },
+        ) as exchange:
+            self.browser.return_value.callback_url = self.callback_url
+            self.service._thread.join(timeout=2)
         self.assertFalse(self.service._thread.is_alive())
-        # Reopen through HTTPServer so TCP TIME_WAIT is not a leaked listener.
-        with patch.object(login, "CALLBACK_PORTS", (urlsplit(self.redirect).port,)):
-            self.assertEqual(self.service.start()["status"], "waiting")
+        exchange.assert_called_once()
+        self.assertEqual(self.service.snapshot()["status"], "success")
+        self.browser.return_value.close.assert_called()
+        self.assertEqual(self.start()["status"], "waiting")
 
-    def test_busy_ports_do_not_interrupt_existing_apps(self):
-        with patch.object(login, "HTTPServer", side_effect=OSError("busy")):
-            with self.assertRaises(balances.BalanceError):
-                self.service.start()
-        self.browser.assert_not_called()
+    def test_invalid_captured_callback_marks_error_and_stops_waiting(self):
+        self.start()
+        with patch.object(login, "exchange_code") as exchange:
+            self.browser.return_value.callback_url = (
+                "http://evil.example/auth/callback?state=wrong&code=x"
+            )
+            self.service._thread.join(timeout=2)
+        exchange.assert_not_called()
+        self.assertEqual(self.service.snapshot()["status"], "error")
+        self.assertIsNone(self.service._pending)
 
-    def test_window_launch_failure_cleans_listener(self):
+    def test_window_launch_failure_cleans_pending_state(self):
         self.browser.side_effect = balances.BalanceError("no browser")
         with self.assertRaises(balances.BalanceError):
-            self.service.start()
+            self.service.start(self.CREDS)
         self.assertIsNone(self.service._pending)
 
 
@@ -228,6 +252,163 @@ class PrivateBrowserTests(unittest.TestCase):
 
 
 class TokenExchangeTests(unittest.TestCase):
+    def test_manual_proxy_login_uses_bps_device_approval_and_saves_its_issuer(self):
+        verifier = "v" * 43
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        calls = []
+
+        def respond(request):
+            calls.append(request)
+            if request.url.path.endswith("/usercode"):
+                return httpx.Response(200, json={"user_code": "TEST-1234", "device_auth_id": "fixture", "interval": 1})
+            if request.url.path.endswith("/deviceauth/token"):
+                if len(calls) == 2:
+                    return httpx.Response(403, json={"error": {"code": "deviceauth_authorization_pending"}})
+                return httpx.Response(200, json={"authorization_code": "approved", "code_verifier": verifier, "code_challenge": challenge})
+            return httpx.Response(200, json={"access_token": "fixture-access", "refresh_token": "fixture-refresh", "expires_in": 3600})
+
+        create_client = httpx.Client
+        store = Mock()
+        store.import_accounts.return_value = {"imported_ids": ["account"]}
+        service = login.AccountLoginService(store, offline_access=True)
+        with (
+            patch.object(login, "PrivateLoginBrowser") as browser,
+            patch.object(login.httpx, "Client", side_effect=lambda **kw: create_client(transport=httpx.MockTransport(respond), **kw)),
+        ):
+            service.start()
+            service._thread.join(5)
+            self.assertEqual(service.snapshot()["status"], "success")
+            browser.assert_called_once_with(login.bps_device_auth.APPROVAL_URL)
+            browser.return_value.close.assert_called_once()
+        self.assertEqual(json.loads(calls[0].content)["client_id"], login.bps_device_auth.CLIENT_ID)
+        self.assertEqual(str(calls[-1].url), login.TOKEN_URL + "?unified=true")
+        self.assertEqual(parse_qs(calls[-1].content.decode())["code_verifier"], [verifier])
+        saved = store.import_accounts.call_args.args[0]
+        self.assertEqual(saved["client_id"], login.bps_device_auth.CLIENT_ID)
+        self.assertEqual(saved["access_token"], "fixture-access")
+        self.assertNotIn("fixture", str(service.snapshot()))
+
+    def test_manual_balance_login_uses_bps_device_approval_without_refresh_token(self):
+        verifier = "v" * 43
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .decode()
+            .rstrip("=")
+        )
+
+        def respond(request):
+            if request.url.path.endswith("/usercode"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "user_code": "TEST-5678",
+                        "device_auth_id": "fixture",
+                        "interval": 1,
+                    },
+                )
+            if request.url.path.endswith("/deviceauth/token"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "authorization_code": "approved",
+                        "code_verifier": verifier,
+                        "code_challenge": challenge,
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "fixture-access",
+                    "refresh_token": "fixture-refresh",
+                    "expires_in": 3600,
+                },
+            )
+
+        create_client = httpx.Client
+        store = Mock()
+        store.import_accounts.return_value = {"imported_ids": ["account"]}
+        service = login.AccountLoginService(store, offline_access=False)
+        with (
+            patch.object(login, "PrivateLoginBrowser"),
+            patch.object(
+                login.httpx,
+                "Client",
+                side_effect=lambda **kw: create_client(
+                    transport=httpx.MockTransport(respond), **kw
+                ),
+            ),
+        ):
+            service.start()
+            service._thread.join(5)
+        self.assertEqual(service.snapshot()["status"], "success")
+        saved = store.import_accounts.call_args.args[0]
+        self.assertEqual(saved, {"access_token": "fixture-access"})
+
+    def test_bps_browser_code_exchange_uses_unified_token_endpoint_and_issuer(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "bps-access",
+                    "refresh_token": "bps-refresh",
+                    "id_token": "id-secret",
+                    "expires_in": 3600,
+                },
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(login.httpx, "Client", return_value=client):
+            result = login.exchange_code(
+                "bps-code",
+                {
+                    "client_id": login.bps_device_auth.CLIENT_ID,
+                    "redirect_uri": login.bps_device_auth.BROWSER_REDIRECT_URI,
+                    "verifier": "verifier",
+                    "offline_access": True,
+                },
+            )
+        self.assertEqual(str(seen[0].url), login.TOKEN_URL + "?unified=true")
+        form = parse_qs(seen[0].content.decode())
+        self.assertEqual(form["client_id"], [login.bps_device_auth.CLIENT_ID])
+        self.assertEqual(
+            form["redirect_uri"], [login.bps_device_auth.BROWSER_REDIRECT_URI]
+        )
+        self.assertEqual(result["client_id"], login.bps_device_auth.CLIENT_ID)
+        self.assertEqual(result["refresh_token"], "bps-refresh")
+        self.assertNotIn("id_token", result)
+
+    def test_cancel_during_device_code_request_never_opens_browser_or_saves_account(self):
+        entered, release = threading.Event(), threading.Event()
+        def get_code(_client):
+            entered.set()
+            release.wait(5)
+            return {"user_code": "test"}, 1
+
+        service = login.AccountLoginService(Mock(), offline_access=True)
+        with (
+            patch.object(login.bps_device_auth, "request_code", side_effect=get_code),
+            patch.object(login.httpx, "Client"),
+            patch.object(login, "PrivateLoginBrowser") as browser,
+        ):
+            service.start()
+            self.assertTrue(entered.wait(3))
+            service.cancel()
+            release.set()
+            service.close()
+        browser.assert_not_called()
+        service.store.import_accounts.assert_not_called()
+        self.assertEqual(service.snapshot()["status"], "cancelled")
+
+    def test_device_grant_rejects_an_unmatched_challenge(self):
+        with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
+            "authorization_code": "code", "code_verifier": "x" * 43, "code_challenge": "wrong",
+        }))) as client:
+            with self.assertRaisesRegex(ValueError, "challenge"):
+                login.bps_device_auth.poll_grant(client, {"device_auth_id": "fixture"})
+
     def test_proxy_login_retains_refresh_token_but_never_id_token(self):
         client = httpx.Client(
             transport=httpx.MockTransport(
@@ -472,11 +653,12 @@ class CredentialFormatTests(unittest.TestCase):
 
 
 class AutomatedServiceTests(unittest.TestCase):
-    def test_automated_login_reuses_callback_and_clears_secrets_from_public_state(self):
+    def test_automated_login_captures_bps_callback_and_clears_secrets_from_public_state(
+        self,
+    ):
         service = login.AccountLoginService(balances.AccountBalanceStore())
         self.addCleanup(service.close)
         with (
-            patch.object(login, "CALLBACK_PORTS", (0,)),
             patch.object(
                 login,
                 "find_login_browser",
@@ -488,6 +670,8 @@ class AutomatedServiceTests(unittest.TestCase):
             closed = threading.Event()
             browser.return_value.close.side_effect = closed.set
             browser.return_value.is_alive.return_value = True
+            browser.return_value.callback_url = None
+            browser.return_value.error = None
             browser.return_value.message = "正在填写账号…"
             result = service.start(
                 "user@example.com----private-password---JBSWY3DPEHPK3PXP"
@@ -498,25 +682,23 @@ class AutomatedServiceTests(unittest.TestCase):
             self.assertNotIn("JBSWY3DPEHPK3PXP", repr(service._pending))
             manual.assert_not_called()
             query = parse_qs(urlsplit(browser.call_args.args[0]).query)
-            path = "/auth/callback?" + urlencode(
-                {"state": query["state"][0], "code": "test-code"}
+            callback_url = (
+                login.bps_device_auth.BROWSER_REDIRECT_URI
+                + "?"
+                + urlencode({"state": query["state"][0], "code": "test-code"})
             )
             with patch.object(
                 login,
                 "exchange_code",
                 return_value={"access_token": "fake-access-token"},
             ):
-                self.assertEqual(
-                    service.complete(path, urlsplit(query["redirect_uri"][0]).netloc)[
-                        0
-                    ],
-                    200,
+                browser.return_value.callback_url = callback_url
+                self.assertTrue(
+                    closed.wait(2),
+                    "Successful callback must close the window without explicit cancellation",
                 )
+            service._thread.join(timeout=2)
             self.assertEqual(len(service.store.snapshot()["accounts"]), 1)
-            self.assertTrue(
-                closed.wait(2),
-                "Successful callback must close the window without explicit cancellation",
-            )
             browser.return_value.close.assert_called()
 
     def test_invalid_credentials_never_open_a_browser(self):
@@ -619,6 +801,71 @@ class AutomatedBrowserLifecycleTests(unittest.TestCase):
         self.assertIsNone(self.worker.error)
         self.native.close.assert_called_once()
 
+    def test_cdp_fetch_capture_aborts_callback_and_accepts_main_frame_only(self):
+        callback_uri = login.bps_device_auth.BROWSER_REDIRECT_URI
+        handlers = {}
+        cdp = Mock()
+        cdp.send.side_effect = lambda method, params=None: (
+            {"frameTree": {"frame": {"id": "main-frame"}}}
+            if method == "Page.getFrameTree"
+            else {}
+        )
+        cdp.on.side_effect = lambda event, fn: handlers.__setitem__(event, fn)
+        self.page.context = self.context
+        self.context.new_cdp_session.return_value = cdp
+
+        def fire_paused(*_args, **_kwargs):
+            paused = handlers["Fetch.requestPaused"]
+            # Non-matching URL continues normally.
+            paused(
+                {
+                    "requestId": "req-other",
+                    "frameId": "main-frame",
+                    "request": {"url": callback_uri + "-extra"},
+                }
+            )
+            # Subframe callback is aborted and ignored.
+            paused(
+                {
+                    "requestId": "req-subframe",
+                    "frameId": "sub-frame",
+                    "request": {"url": callback_uri + "?code=bad&state=s"},
+                }
+            )
+            # Main-frame callback is aborted before network delivery and captured.
+            paused(
+                {
+                    "requestId": "req-main",
+                    "frameId": "main-frame",
+                    "request": {"url": callback_uri + "?code=good&state=s"},
+                }
+            )
+            raise RuntimeError("net::ERR_ABORTED")
+
+        self.page.goto.side_effect = fire_paused
+        self.browser.is_connected.return_value = True
+        self.page.is_closed.return_value = False
+        self.worker._run(
+            login.AUTHORIZE_URL,
+            self.factory,
+            self.credentials,
+            callback_uri=callback_uri,
+        )
+        self.assertEqual(self.worker.callback_url, callback_uri + "?code=good&state=s")
+        cdp.send.assert_any_call(
+            "Fetch.continueRequest", {"requestId": "req-other"}
+        )
+        cdp.send.assert_any_call(
+            "Fetch.failRequest",
+            {"requestId": "req-subframe", "errorReason": "Aborted"},
+        )
+        cdp.send.assert_any_call(
+            "Fetch.failRequest",
+            {"requestId": "req-main", "errorReason": "Aborted"},
+        )
+        self.page.wait_for_timeout.assert_not_called()
+        self.native.close.assert_called_once()
+
 
 class AutomatedFormTests(unittest.TestCase):
     def setUp(self):
@@ -670,7 +917,8 @@ class AutomatedFormTests(unittest.TestCase):
             self.assertTrue(
                 self.browser._advance(self.page, self.credentials, submitted)
             )
-            get_code.assert_called_once_with(self.page.context, "JBSWY3DPEHPK3PXP")
+            get_code.assert_called_once_with("JBSWY3DPEHPK3PXP")
+        self.page.context.new_page.assert_not_called()
         self.code.fill.assert_called_once_with("123456")
         self.assertEqual(self.credentials, {})
 
@@ -685,17 +933,24 @@ class AutomatedFormTests(unittest.TestCase):
         self.page.locator.assert_not_called()
 
     def test_workspace_selection_and_consent_remain_manual(self):
-        self.page.url = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
-        with patch.object(self.browser, "_submit") as submit:
-            self.assertFalse(
-                self.browser._advance(
-                    self.page, self.credentials, {"email", "password", "code"}
-                )
-            )
-        submit.assert_not_called()
-        self.page.get_by_role.assert_not_called()
-        for field in (self.email, self.password, self.code):
-            field.fill.assert_not_called()
+        for url in (
+            "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+            "https://auth.openai.com/workspace",
+        ):
+            with self.subTest(url=url):
+                self.page.url = url
+                creds = dict(self.credentials)
+                with patch.object(self.browser, "_submit") as submit:
+                    self.assertFalse(
+                        self.browser._advance(
+                            self.page, creds, {"email", "password", "code"}
+                        )
+                    )
+                self.assertEqual(creds, {})
+                submit.assert_not_called()
+                self.page.get_by_role.assert_not_called()
+                for field in (self.email, self.password, self.code):
+                    field.fill.assert_not_called()
 
     def test_email_verification_and_challenges_require_manual_input(self):
         self.code.is_visible.return_value = True
@@ -717,30 +972,20 @@ class AutomatedFormTests(unittest.TestCase):
             get_code.assert_not_called()
         self.code.fill.assert_not_called()
 
-    def test_code_is_read_from_2fa_fun_and_tab_is_closed(self):
-        page = Mock(url="https://2fa.fun/")
-        field = page.locator.return_value
-        field.count.return_value = 1
-        field.is_visible.return_value = True
-        field.input_value.return_value = "123456"
-        context = Mock(new_page=Mock(return_value=page))
-        with patch.object(automation.time, "time", return_value=60):
-            self.assertEqual(
-                self.browser._verification_code(context, "JBSWY3DPEHPK3PXP"), "123456"
-            )
-        page.goto.assert_called_once_with(
-            "https://2fa.fun/", wait_until="domcontentloaded", timeout=15000
-        )
-        field.fill.assert_called_once_with("JBSWY3DPEHPK3PXP")
-        page.close.assert_called_once()
+    def test_local_codes_match_rfc6238_vectors_including_leading_zeroes(self):
+        secret = base64.b32encode(b"12345678901234567890").decode("ascii")
+        for timestamp, expected in ((1111111111, "050471"), (1234567890, "005924")):
+            with patch.object(automation.time, "time", return_value=timestamp):
+                self.assertEqual(self.browser._verification_code(secret), expected)
 
-    def test_code_site_redirect_or_cancel_does_not_receive_secret(self):
-        page = Mock(url="https://evil.example/")
-        context = Mock(new_page=Mock(return_value=page))
-        with self.assertRaises(balances.BalanceError):
-            self.browser._verification_code(context, "JBSWY3DPEHPK3PXP")
-        page.locator.assert_not_called()
-        page.close.assert_called_once()
+    def test_cancel_while_waiting_for_a_fresh_code(self):
+        with (
+            patch.object(automation.time, "time", return_value=58),
+            patch.object(self.browser._stop, "wait", return_value=True) as wait,
+            self.assertRaises(balances.BalanceError),
+        ):
+            self.browser._verification_code("JBSWY3DPEHPK3PXP")
+        wait.assert_called_once_with(2)
 
     def test_cancel_after_code_lookup_does_not_submit_it(self):
         self.code.is_visible.return_value = True

@@ -1,13 +1,11 @@
-"""Private OAuth login with optional, transient browser form automation.
+"""Private Excel/BPS OAuth login with optional, transient browser form automation.
 
-OAuth constants follow openai/codex e72da2b53805894878023d01949a25a082e0a5cb.
 This never reads or overwrites Codex/Excel login files. Balance-only login
 discards refresh tokens; direct proxy login explicitly requests offline access.
 """
 
 import base64
 import hashlib
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
@@ -16,10 +14,11 @@ import subprocess
 import tempfile
 import threading
 import time
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
+import bps_device_auth
 from account_balances import balance_store
 from account_identity import (
     BalanceError,
@@ -29,11 +28,9 @@ from account_identity import (
 )
 from account_login_browser import AutomatedLoginBrowser, parse_credentials
 
-AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
+AUTHORIZE_URL = bps_device_auth.AUTHORIZE_URL
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-# Registered CLI callback ports; never stop another app to acquire either port.
-CALLBACK_PORTS = (1455, 1457)
 LOGIN_SECONDS = 600
 
 
@@ -139,9 +136,10 @@ class PrivateLoginBrowser:
 
 
 def _token_response(data):
+    url = TOKEN_URL + "?unified=true" if data["client_id"] == bps_device_auth.CLIENT_ID else TOKEN_URL
     try:
         with httpx.Client(timeout=20, follow_redirects=False) as client:
-            with client.stream("POST", TOKEN_URL, data=data) as response:
+            with client.stream("POST", url, data=data) as response:
                 if response.status_code != 200:
                     raise BalanceError(
                         "登录授权未能完成，请重新登录；不会保存密码或验证码。",
@@ -180,28 +178,31 @@ def _proxy_credentials(payload):
 
 
 def exchange_code(code, pending):
+    client_id = pending.get("client_id", CLIENT_ID)
     payload = _token_response(
         {
             "grant_type": "authorization_code",
-            "client_id": CLIENT_ID,
+            "client_id": client_id,
             "code": code,
             "redirect_uri": pending["redirect_uri"],
             "code_verifier": pending["verifier"],
         }
     )
     account = _proxy_credentials(payload)
+    if client_id == bps_device_auth.CLIENT_ID and pending.get("offline_access"):
+        account["client_id"] = client_id
     if not pending.get("offline_access"):
         account.pop("refresh_token", None)
         account.pop("expires_at", None)
     return account
 
 
-def refresh_credentials(refresh_token):
+def refresh_credentials(refresh_token, *, client_id=CLIENT_ID):
     return _proxy_credentials(
         _token_response(
             {
                 "grant_type": "refresh_token",
-                "client_id": CLIENT_ID,
+                "client_id": client_id,
                 "refresh_token": refresh_token,
             }
         )
@@ -235,97 +236,55 @@ class AccountLoginService:
         with self._lock:
             if self._pending is not None:
                 raise BalanceError("已有登录正在进行，请完成或取消后再添加账号。", 409)
-            service = self
-
-            class CallbackHandler(BaseHTTPRequestHandler):
-                def setup(self):
-                    super().setup()
-                    self.connection.settimeout(5)
-
-                def log_message(self, *_args):
-                    pass  # Authorization codes must never enter access logs.
-
-                def do_GET(self):
-                    status, message = service.complete(
-                        self.path, self.headers.get("Host", "")
-                    )
-                    nonce = secrets.token_urlsafe(16)
-                    body = (
-                        f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>账号登录</title>'
-                        f"<h1>账号登录</h1><p>{message}</p><p>请返回 Excel 连接服务。</p>"
-                        f'<script nonce="{nonce}">history.replaceState(null,"","/auth/complete");</script></html>'
-                    ).encode()
-                    self.send_response(status)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("Referrer-Policy", "no-referrer")
-                    self.send_header(
-                        "Content-Security-Policy",
-                        f"default-src 'none'; script-src 'nonce-{nonce}'; frame-ancestors 'none'",
-                    )
-                    self.end_headers()
-                    try:
-                        self.wfile.write(body)
-                    except OSError:
-                        pass
-
-            server = None
-            for port in CALLBACK_PORTS:
-                try:
-                    server = HTTPServer(("127.0.0.1", port), CallbackHandler)
-                    break
-                except OSError:
-                    continue
-            if server is None:
-                raise BalanceError(
-                    "登录回调端口 1455 和 1457 正被占用。请完成其他登录后重试，或使用 JSON 导入。",
-                    409,
+            if credentials is None:
+                pending = {
+                    "stop": threading.Event(),
+                    "browser": None,
+                    "expires_at": time.time() + LOGIN_SECONDS,
+                }
+                self._pending = pending
+                self._status = {
+                    "status": "waiting",
+                    "message": "正在获取 Excel 设备码…",
+                }
+                self._thread = threading.Thread(
+                    target=self._device_login,
+                    args=(pending,),
+                    daemon=True,
+                    name="bps-login",
                 )
-            server.timeout = 0.25
+                self._thread.start()
+                return self.snapshot()
             verifier = secrets.token_urlsafe(32)
-            pending = {
-                "state": secrets.token_urlsafe(32),
-                "verifier": verifier,
-                "redirect_uri": f"http://127.0.0.1:{server.server_port}/auth/callback",
-                "expires_at": time.time() + LOGIN_SECONDS,
-                "stop": threading.Event(),
-                "offline_access": self.offline_access,
-                "automated": credentials is not None,
-            }
+            state = secrets.token_urlsafe(32)
             challenge = (
                 base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
                 .decode()
                 .rstrip("=")
             )
-            url = (
-                AUTHORIZE_URL
-                + "?"
-                + urlencode(
-                    {
-                        "response_type": "code",
-                        "client_id": CLIENT_ID,
-                        "redirect_uri": pending["redirect_uri"],
-                        "scope": "openid profile email"
-                        + (" offline_access" if self.offline_access else ""),
-                        "state": pending["state"],
-                        "code_challenge": challenge,
-                        "code_challenge_method": "S256",
-                        "id_token_add_organizations": "true",
-                        "codex_cli_simplified_flow": "true",
-                        "prompt": "login",
-                    }
-                )
+            redirect_uri = bps_device_auth.BROWSER_REDIRECT_URI
+            url = bps_device_auth.browser_authorize_url(
+                state, challenge, offline_access=self.offline_access
             )
+            pending = {
+                "state": state,
+                "verifier": verifier,
+                "client_id": bps_device_auth.CLIENT_ID,
+                "redirect_uri": redirect_uri,
+                "expires_at": time.time() + LOGIN_SECONDS,
+                "stop": threading.Event(),
+                "offline_access": self.offline_access,
+                "automated": True,
+            }
             self._pending = pending
             try:
-                pending["browser"] = (
-                    AutomatedLoginBrowser(url, PrivateLoginBrowser, credentials)
-                    if credentials is not None
-                    else PrivateLoginBrowser(url)
+                pending["browser"] = AutomatedLoginBrowser(
+                    url,
+                    PrivateLoginBrowser,
+                    credentials,
+                    callback_uri=redirect_uri,
                 )
             except BalanceError:
-                server.server_close()
                 self._pending = None
                 raise
             self._status = {
@@ -334,27 +293,90 @@ class AccountLoginService:
                 "expires_at": pending["expires_at"],
             }
             self._thread = threading.Thread(
-                target=self._serve,
-                args=(server, pending),
+                target=self._serve_browser,
+                args=(pending,),
                 daemon=True,
                 name="account-login",
             )
             self._thread.start()
         return self.snapshot()
 
-    def _serve(self, server, pending):
+    def _device_login(self, pending):
+        browser = None
+        stop = pending["stop"]
         try:
+            with httpx.Client(timeout=15, follow_redirects=False) as client:
+                device, interval = bps_device_auth.request_code(client)
+                with self._lock:
+                    if stop.is_set():
+                        return
+                    browser = pending["browser"] = PrivateLoginBrowser(
+                        bps_device_auth.APPROVAL_URL
+                    )
+                    self._status = {
+                        "status": "waiting",
+                        "expires_at": pending["expires_at"],
+                        "message": f"请在已打开的 OpenAI 授权页输入设备码 {device['user_code']}，并确认本次 Excel 登录。",
+                    }
+                while True:
+                    remaining = pending["expires_at"] - time.time()
+                    if stop.wait(max(0, min(interval, remaining))):
+                        return
+                    if time.time() >= pending["expires_at"] or not browser.is_alive():
+                        raise BalanceError("授权已超时或登录窗口已关闭，请重新登录。")
+                    form = bps_device_auth.poll_grant(client, device)
+                    if form is not None:
+                        break
+            with self._lock:
+                if stop.is_set():
+                    return
+                self._status = {
+                    "status": "exchanging",
+                    "message": "正在保存 Excel 授权…",
+                }
+            account = _proxy_credentials(_token_response(form))
+            if self.offline_access:
+                account["client_id"] = bps_device_auth.CLIENT_ID
+            else:
+                account.pop("refresh_token", None)
+                account.pop("expires_at", None)
+            self._save_login(pending, account)
+        except (BalanceError, httpx.HTTPError, ValueError) as exc:
+            with self._lock:
+                if not stop.is_set():
+                    self._status = {
+                        "status": "error",
+                        "message": str(exc)
+                        if isinstance(exc, BalanceError)
+                        else "无法完成 Excel 设备授权，请检查网络后重新登录。",
+                    }
+        finally:
+            if browser is not None:
+                browser.close()
+            with self._lock:
+                if self._pending is pending:
+                    self._pending = None
+
+    def _serve_browser(self, pending):
+        try:
+            browser = pending["browser"]
             while not pending["stop"].is_set():
-                if not pending["browser"].is_alive():
+                callback_url = getattr(browser, "callback_url", None)
+                if callback_url is not None:
+                    self.complete_callback(callback_url)
+                    break
+                if not browser.is_alive():
+                    callback_url = getattr(browser, "callback_url", None)
+                    if callback_url is not None:
+                        self.complete_callback(callback_url)
+                        break
                     with self._lock:
                         if (
                             self._pending is pending
                             and self._status["status"] == "waiting"
                         ):
                             error = (
-                                pending["browser"].error
-                                if pending.get("automated")
-                                else None
+                                browser.error if pending.get("automated") else None
                             )
                             self._status = {
                                 "status": "error" if error else "cancelled",
@@ -370,13 +392,38 @@ class AccountLoginService:
                                 "message": "登录已超时，请重新开始。",
                             }
                     break
-                server.handle_request()
+                pending["stop"].wait(0.1)
         finally:
-            server.server_close()
             pending["browser"].close()
             with self._lock:
                 if self._pending is pending:
                     self._pending = None
+
+    def complete_callback(self, callback_url):
+        with self._lock:
+            pending = self._pending
+            if not pending or self._status["status"] != "waiting":
+                return 409, "这次登录已结束，请返回应用重新开始。"
+            if not bps_device_auth.matches_browser_callback(callback_url):
+                self._status = {
+                    "status": "error",
+                    "message": "登录返回地址不正确，请返回应用重新登录。",
+                }
+                pending["stop"].set()
+                return 400, self._status["message"]
+        parsed = urlsplit(callback_url)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+        status, message = self.complete(path, parsed.netloc)
+        if status >= 400:
+            with self._lock:
+                if (
+                    self._pending is pending
+                    and self._status["status"] == "waiting"
+                    and not pending["stop"].is_set()
+                ):
+                    self._status = {"status": "error", "message": message}
+                    pending["stop"].set()
+        return status, message
 
     def complete(self, path, host):
         with self._lock:
@@ -386,11 +433,14 @@ class AccountLoginService:
             if time.time() >= pending["expires_at"]:
                 return 400, "登录已超时，请返回应用重新开始。"
             try:
+                expected = urlsplit(pending["redirect_uri"])
                 parsed = urlsplit(path)
                 if (
-                    host != urlsplit(pending["redirect_uri"]).netloc
-                    or parsed.path != "/auth/callback"
-                    or len(path) > 16384
+                    not isinstance(path, str)
+                    or "#" in path
+                    or host != expected.netloc
+                    or parsed.path != expected.path
+                    or len(path) > bps_device_auth.MAX_CALLBACK_URL_LEN
                 ):
                     return 400, "登录返回地址不正确，请返回应用重新登录。"
                 query = parse_qs(parsed.query, max_num_fields=20)
@@ -411,22 +461,7 @@ class AccountLoginService:
             self._status = {"status": "exchanging", "message": "正在保存账号…"}
         try:
             account = exchange_code(codes[0], pending)
-            with self._lock:
-                if self._pending is not pending or pending["stop"].is_set():
-                    return 409, "登录已取消，登录信息未保存。"
-                if time.time() >= pending["expires_at"]:
-                    self._status = {
-                        "status": "expired",
-                        "message": "登录已超时，请重新开始。",
-                    }
-                    return 400, self._status["message"]
-                result = self.store.import_accounts(account)
-                self._status = {
-                    "status": "success",
-                    "message": "账号已添加，登录窗口将自动关闭。",
-                    "account_id": result["imported_ids"][0],
-                }
-                return 200, self._status["message"]
+            return self._save_login(pending, account)
         except BalanceError:
             with self._lock:
                 if self._pending is pending and not pending["stop"].is_set():
@@ -437,6 +472,20 @@ class AccountLoginService:
             return 400, "登录未能完成，请返回应用重试。"
         finally:
             pending["stop"].set()
+
+    def _save_login(self, pending, account):
+        with self._lock:
+            if self._pending is not pending or pending["stop"].is_set():
+                return 409, "登录已取消，登录信息未保存。"
+            if time.time() >= pending["expires_at"]:
+                self._status = {"status": "expired", "message": "登录已超时，请重新开始。"}
+                return 400, self._status["message"]
+            result = self.store.import_accounts(account)
+            self._status = {
+                "status": "success", "message": "账号已添加，登录窗口将自动关闭。",
+                "account_id": result["imported_ids"][0],
+            }
+            return 200, self._status["message"]
 
     def cancel(self):
         browser = None

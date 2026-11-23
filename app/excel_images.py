@@ -10,14 +10,16 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import re
 from collections import OrderedDict
+from urllib.parse import urlsplit
 
 import httpx
 
-import excel_upstream
+from excel_session import HTTP_API_BASE_URL
 
 
-ATTACHMENTS_URL = excel_upstream.RESPONSES_URL.rsplit("/", 1)[0] + "/attachments"
+ATTACHMENTS_URL = HTTP_API_BASE_URL + "/attachments"
 _CACHE_SIZE = 256
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024
@@ -30,6 +32,121 @@ _EXTENSIONS = {
 }
 
 
+def _validate_image_reference(part: dict) -> None:
+    detail = part.get("detail")
+    if detail is not None and detail not in ("auto", "low", "high"):
+        raise ValueError("Excel image detail must be auto, low or high.")
+    file_id = part.get("file_id")
+    if file_id is not None and (
+        not isinstance(file_id, str) or not file_id or file_id.strip() != file_id
+    ):
+        raise ValueError(
+            "Excel image file_id must be a nonempty string without surrounding whitespace."
+        )
+    raw = part.get("image_url")
+    if raw is None and file_id:
+        return
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("Excel input_image requires image_url or an explicit file_id.")
+    if raw.startswith("data:"):
+        return  # Inline media and request byte limits are checked before uploads.
+    try:
+        parsed = urlsplit(raw)
+        valid = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and raw.strip() == raw
+            and not re.search(r"[\x00-\x20\x7f\\]", raw)
+            and not re.search(r"%(?![0-9a-fA-F]{2})", raw)
+        )
+        parsed.port  # Reject malformed port syntax as well as malformed hosts.
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(
+            "Excel input_image requires an absolute HTTPS image URL without embedded credentials."
+        )
+
+
+def _normalize_image(part: dict) -> dict:
+    result = {"type": "input_image"}
+    for key in ("detail", "file_id"):
+        if key in part:
+            result[key] = part[key]
+    if part.get("type") in {"image_url", "input_image"}:
+        image_url = part.get("image_url")
+        if isinstance(image_url, str):
+            result["image_url"] = image_url
+        elif isinstance(image_url, dict):
+            result["image_url"] = image_url.get("url")
+            if "detail" in image_url:
+                result["detail"] = image_url["detail"]
+    else:
+        source = part.get("source")
+        if isinstance(source, dict):
+            if source.get("type") == "base64":
+                media_type, data = source.get("media_type"), source.get("data")
+                if (
+                    not isinstance(media_type, str) or not media_type
+                    or not isinstance(data, str) or not data
+                ):
+                    raise ValueError("Excel image source requires media_type and data.")
+                result["image_url"] = f"data:{media_type};base64,{data}"
+            elif source.get("type") == "url":
+                result["image_url"] = source.get("url")
+            else:
+                raise ValueError("Excel image source supports base64 or url only.")
+        elif all(
+            isinstance(part.get(key), str) and part[key]
+            for key in ("mimeType", "data")
+        ):
+            result["image_url"] = f"data:{part['mimeType']};base64,{part['data']}"
+        else:
+            raise ValueError("Excel image requires a source or MCP mimeType and data.")
+    _validate_image_reference(result)
+    return result
+
+
+def normalize_input_content(item: dict, *, index: int) -> dict:
+    """Normalize supported parts without changing caller-owned history objects."""
+    result = dict(item)
+    agent = item.get("type") == "agent_message"
+    if agent and not isinstance(item.get("content"), list):
+        raise ValueError(
+            f"Excel agent_message content must be an array (path=input[{index}].content)."
+        )
+    fields = ["content"]
+    if item.get("type") in ("function_call_output", "custom_tool_call_output"):
+        fields.append("output")
+    for field in fields:
+        if not isinstance(item.get(field), list):
+            continue
+        parts = []
+        for part in item[field]:
+            if isinstance(part, str):
+                part = {"type": "input_text", "text": part}
+            kind = part.get("type") if isinstance(part, dict) else None
+            if kind in ("image", "image_url", "input_image"):
+                part = _normalize_image(part)
+            elif agent and field == "content" and kind == "encrypted_content":
+                encrypted = part.get("encrypted_content")
+                if not isinstance(encrypted, str) or not encrypted:
+                    raise ValueError(
+                        "Excel agent_message encrypted_content must be a nonempty string."
+                    )
+            elif kind not in ("input_text", "output_text", "text", "refusal"):
+                category = kind if kind in (
+                    "input_audio", "audio", "input_file", "file", "resource", "resource_link",
+                    "output_image", "video", "encrypted_content",
+                ) else "missing_type" if kind is None else "unknown_type"
+                raise ValueError(f"Excel unsupported content category {category}; supports text and images only.")
+            parts.append(part)
+        result[field] = parts
+    return result
+
+
 def _validated_images(items: list) -> dict[tuple[int, int], tuple[str, bytes]]:
     """Check the whole image request before making any attachment uploads."""
     decoded = {}
@@ -39,7 +156,7 @@ def _validated_images(items: list) -> dict[tuple[int, int], tuple[str, bytes]]:
             continue
         if item.get("type") in (None, "message", "agent_message"):
             parts = item.get("content")
-        elif item.get("type") in {"function_call_output", "custom_tool_call_output"}:
+        elif item.get("type") in ("function_call_output", "custom_tool_call_output"):
             parts = item.get("output")
         else:
             continue
@@ -122,9 +239,14 @@ class ExcelImageUploads:
         headers: dict,
     ) -> tuple[dict, set[tuple[str, str]]]:
         """Return an upstream body and cache keys eligible for one stale-file retry."""
-        items = body.get("input")
-        if not isinstance(items, list):
+        raw_items = body.get("input")
+        if not isinstance(raw_items, list):
             return body, set()
+        items = []
+        for index, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                raise ValueError(f"Excel input items must be objects (path=input[{index}]).")
+            items.append(normalize_input_content(item, index=index))
         decoded = _validated_images(items)
         account = headers.get("chatgpt-account-id") or headers.get(
             "x-openai-account-id", ""

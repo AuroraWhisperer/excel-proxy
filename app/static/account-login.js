@@ -9,7 +9,7 @@ window.promptAccountCredentials = function () {
       <label for="credential-input">账号、密码和 2FA 密钥</label>
       <input id="credential-input" type="password" autocomplete="off" spellcheck="false" maxlength="8192" required aria-describedby="credential-format credential-notice" placeholder="粘贴一行账号信息">
       <p id="credential-format" class="hint">格式：邮箱----密码----2FA密钥，也支持用 --- 分隔。</p>
-      <p id="credential-notice" class="hint">2FA 密钥会发送给第三方网站 2fa.fun 获取验证码。密码和密钥仅用于本次登录；如需额外验证，请在登录窗口完成。</p>
+      <p id="credential-notice" class="hint">验证码在本机生成。密码和密钥仅用于本次登录。如需额外验证，请在登录窗口完成。</p>
       <p class="error" role="alert" hidden></p>
       <div class="toolbar"><button type="button">取消</button><button type="submit" class="primary">登录</button></div>
     </form>`;

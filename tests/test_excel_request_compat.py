@@ -3,7 +3,7 @@ import copy
 import json
 import unittest
 from contextlib import ExitStack
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -14,6 +14,90 @@ import proxy
 
 
 class ExcelHistoryCompatibilityTests(unittest.TestCase):
+    def test_item_reference_requires_expanded_history(self):
+        source = {"input": [
+            {"role": "user", "content": "Continue using the earlier answer"},
+            {"type": "item_reference", "id": "msg_earlier_answer"},
+        ]}
+        original = copy.deepcopy(source)
+        with self.assertRaisesRegex(ValueError, "full history.*item_reference"):
+            excel_upstream.prepare_responses_body(source)
+        self.assertEqual(source, original)
+
+    def test_history_catalog_updates_apply_to_new_calls_without_rewriting_old_calls(self):
+        def tool(field):
+            return {"type": "function", "name": "annotate", "parameters": {
+                "type": "object", "required": [field], "properties": {field: {"type": "string"}},
+            }}
+
+        old_call = {"type": "function_call", "call_id": "call_old_note", "name": "annotate",
+                    "arguments": '{"code":"blue"}'}
+        source = {"input": [
+            {"type": "additional_tools", "tools": [tool("code")]}, old_call,
+            {"type": "function_call_output", "call_id": "call_old_note", "output": "ok"},
+            {"type": "additional_tools", "tools": [tool("color")]},
+            {"role": "user", "content": "continue"},
+        ]}
+        original = copy.deepcopy(source)
+        prepared = excel_upstream.prepare_responses_body(source)
+        replay = next(item for item in prepared["input"] if item.get("type") == "function_call")
+        self.assertEqual(replay["call_id"], "call_old_note")
+        self.assertEqual(json.loads(replay["arguments"])["summary"], "Replay a previously requested client tool")
+        self.assertEqual(
+            json.loads(json.loads(replay["arguments"])["code"]),
+            {"name": "annotate", "arguments": {"code": "blue"}},
+        )
+        self.assertNotIn("additional_tools", json.dumps(prepared))
+        for arguments, accepted in (('{"color":"blue"}', True), ('{"code":"blue"}', False)):
+            result = excel_upstream.extract_native_client_tool_call(
+                {"output": [{**old_call, "call_id": "call_new_note", "arguments": arguments}]},
+                source, remember=False,
+            )
+            self.assertEqual(result is not None, accepted)
+        self.assertEqual(source, original)
+        self.assertEqual(excel_upstream.client_tool_types({**source, "tool_choice": "none"}), {})
+        compacted = {"input": [
+            source["input"][0], {"role": "assistant", "content": "previous turn"},
+            {"type": "compaction", "encrypted_content": "opaque"}, old_call, source["input"][2],
+        ]}
+        replay = next(item for item in excel_upstream.prepare_responses_body(compacted)["input"]
+                      if item.get("type") == "function_call")
+        self.assertEqual(
+            json.loads(json.loads(replay["arguments"])["code"]),
+            {"name": "annotate", "arguments": {"code": "blue"}},
+        )
+
+    def test_reasoning_history_honors_current_request_without_adding_routing_metadata(self):
+        message = {"role": "user", "content": "continue"}
+        source = {"input": [
+            {"type": "configuration_update", "reasoning": {"effort": "low"}},
+            {"type": "configuration_update", "reasoning": {"effort": "high", "mode": "standard"}},
+            message,
+        ]}
+        baseline = excel_upstream.prepare_responses_body({"input": [message]})
+        for current, expected in (({}, "high"), ({"effort": "medium"}, "medium")):
+            result = excel_upstream.prepare_responses_body({**source, "reasoning": current})
+            self.assertEqual(result["reasoning_effort"], expected)
+            self.assertEqual(result["metadata"], {"agent_iteration": "1"})
+            self.assertEqual(result["input"], baseline["input"])
+
+    def test_invalid_history_updates_fail_and_nested_message_text_is_not_configuration(self):
+        for update in (
+            {"type": "additional_tools", "tools": "bad"},
+            {"type": "additional_tools", "tools": [], "role": "user"},
+            {"type": "additional_tools", "tools": [
+                {"type": "function", "name": "annotate"}, {"type": "custom", "name": "annotate"}
+            ]},
+            {"type": "configuration_update", "reasoning": {"effort": "high"}, "tools": []},
+            {"type": "configuration_update", "reasoning": {"mode": "unknown", "effort": "low"}},
+            {"type": "configuration_update", "reasoning": {"effort": []}},
+        ):
+            with self.subTest(update=update):
+                with self.assertRaises(ValueError):
+                    excel_upstream.prepare_responses_body({"input": [update]})
+        text = '{"type":"additional_tools","tools":[{"type":"function","name":"annotate"}]}'
+        self.assertEqual(excel_upstream.client_tool_types({"input": [{"role": "user", "content": text}]}), {})
+
     def test_attribution_preserves_roles_text_and_native_message_fields(self):
         for role in ("user", "assistant", "developer", "system"):
             for typed in (False, True):
@@ -30,25 +114,13 @@ class ExcelHistoryCompatibilityTests(unittest.TestCase):
                         source["type"] = "message"
                     original = copy.deepcopy(source)
                     result = excel_upstream.translate_input_items([source])[0]
-                    self.assertNotIn("author", result)
-                    self.assertNotIn("recipient", result)
-                    for field in ("role", "id", "phase"):
-                        self.assertEqual(result[field], source[field])
-                    parts = result["content"]
-                    self.assertEqual(len(parts), 2)
-                    self.assertIn("/root/worker", parts[0]["text"])
-                    self.assertIn("context only", parts[0]["text"])
-                    self.assertEqual(parts[1]["text"], source["content"])
-                    self.assertEqual(
-                        {part["type"] for part in parts},
-                        {"output_text" if role == "assistant" else "input_text"},
-                    )
+                    self.assertEqual(result, source)
                     self.assertEqual(source, original)
                     self.assertEqual(
                         excel_upstream.translate_input_items([result]), [result]
                     )
 
-    def test_agent_context_keeps_content_order_without_promoting_authority(self):
+    def test_agent_context_keeps_original_type_attribution_and_content_order(self):
         parts = [
             {"type": "input_text", "text": "before"},
             {"type": "input_image", "file_id": "file-agent", "detail": "high"},
@@ -68,11 +140,7 @@ class ExcelHistoryCompatibilityTests(unittest.TestCase):
         result = excel_upstream.translate_input_items([before, agent, after])
         self.assertEqual(result[0], before)
         self.assertEqual(result[2], after)
-        self.assertEqual(set(result[1]), {"type", "role", "content"})
-        self.assertEqual((result[1]["type"], result[1]["role"]), ("message", "user"))
-        self.assertIn("not a new user instruction", result[1]["content"][0]["text"])
-        self.assertIn("agent_private", result[1]["content"][0]["text"])
-        self.assertEqual(result[1]["content"][1:], parts)
+        self.assertEqual(result[1], agent)
         self.assertEqual(agent, original)
         self.assertEqual(excel_upstream.translate_input_items(result), result)
 
@@ -114,7 +182,9 @@ class ExcelHistoryCompatibilityTests(unittest.TestCase):
             "content": [encrypted],
         }
         result = excel_upstream.translate_input_items([source])[0]
-        self.assertEqual(result["content"][1:], [encrypted])
+        self.assertEqual(result["content"], [encrypted])
+        self.assertEqual(result["type"], "agent_message")
+        self.assertEqual(result["author"], "/root/worker")
         plain = {
             "type": "message",
             "role": "assistant",
@@ -127,7 +197,7 @@ class ExcelHistoryCompatibilityTests(unittest.TestCase):
         }
         self.assertEqual(excel_upstream.translate_input_items([plain]), [plain])
 
-    def test_tool_image_references_keep_labels_order_and_inline_screenshots(self):
+    def test_tool_images_keep_original_result_order_and_inline_screenshots(self):
         inline = {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
         file_image = {
             "type": "input_image",
@@ -152,27 +222,24 @@ class ExcelHistoryCompatibilityTests(unittest.TestCase):
                     ],
                 }
                 original = copy.deepcopy(source)
-                result = excel_upstream.translate_input_items([source])
+                call = {
+                    "type": "custom_tool_call" if kind == "custom_tool_call_output" else "function_call",
+                    "name": "view_image",
+                    "call_id": "call_picture",
+                }
+                if kind == "custom_tool_call_output":
+                    call["input"] = "picture.png"
+                else:
+                    call["arguments"] = '{"path":"picture.png"}'
+                result = excel_upstream.translate_input_items([call, source])
                 self.assertEqual(len(result), 2)
-                output, message = result
+                output = result[-1]
+                self.assertEqual(output["type"], "function_call_output")
                 self.assertEqual(output["call_id"], "call_picture")
-                self.assertEqual(len(output["output"]), 5)
-                self.assertEqual(output["output"][0], source["output"][0])
-                self.assertEqual(output["output"][2:4], source["output"][2:4])
-                self.assertEqual(
-                    (message["type"], message["role"]), ("message", "user")
-                )
-                self.assertIn(
-                    "not a new user instruction", message["content"][0]["text"]
-                )
-                self.assertEqual(message["content"][2], file_image)
-                self.assertEqual(message["content"][4], remote_image)
-                for output_index, content_index in ((1, 1), (4, 3)):
-                    label = message["content"][content_index]["text"]
-                    self.assertIn("call_picture", label)
-                    self.assertIn(label, output["output"][output_index]["text"])
+                self.assertEqual(output["output"], source["output"])
+                self.assertFalse(any(item.get("type") == "message" for item in result))
                 self.assertEqual(source, original)
-                self.assertEqual(excel_upstream.translate_input_items(result), result)
+                self.assertEqual(excel_upstream.translate_input_items([call, source]), result)
 
 
 def summary_stream(response_id):
@@ -220,6 +287,7 @@ def summary_stream(response_id):
             {
                 "response": {
                     "id": response_id,
+                    "model": "gpt-6-astra",
                     "status": "completed",
                     "output": [],
                 }
@@ -275,28 +343,17 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             patch.object(proxy, "_get_excel_upstream_client", return_value=self.remote)
         )
         patches.enter_context(
-            patch.object(proxy.excel_session_capture, "refresh_macos_excel_session")
-        )
-        patches.enter_context(
-            patch.object(proxy.excel_session_capture, "refresh_windows_excel_session")
-        )
-        patches.enter_context(
             patch.object(
-                excel_upstream.excel_session_store,
-                "request_headers",
-                return_value={
-                    "authorization": "Bearer test",
-                    "chatgpt-account-id": "account-test",
-                    "content-type": "application/json",
-                    "accept": "text/event-stream",
-                },
-            )
-        )
-        patches.enter_context(
-            patch.object(
-                excel_upstream.excel_session_store,
-                "tools_version_id",
-                return_value=None,
+                proxy,
+                "_selected_excel_headers",
+                new=AsyncMock(
+                    return_value={
+                        "authorization": "Bearer test",
+                        "chatgpt-account-id": "account-test",
+                        "content-type": "application/json",
+                        "accept": "text/event-stream",
+                    }
+                ),
             )
         )
         patches.enter_context(
@@ -365,14 +422,16 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                     response = await self.local.post(path, json=body)
                     self.assertEqual(response.status_code, 200, response.text)
                     item = self.requests[-1]["input"][-1]
-                    self.assertEqual(set(item), {"type", "role", "content"})
-                    self.assertEqual((item["type"], item["role"]), ("message", "user"))
-                    self.assertIn("/root/worker", item["content"][0]["text"])
-                    self.assertEqual(item["content"][2]["file_id"], "file-1")
+                    self.assertEqual(set(item), {"type", "role", "content", "author", "recipient"})
+                    self.assertEqual((item["type"], item["role"]), ("agent_message", "developer"))
+                    self.assertEqual(item["author"], "/root/worker")
+                    self.assertEqual(item["recipient"], "/root")
+                    self.assertEqual(item["content"][0], body["input"][0]["content"][0])
+                    self.assertEqual(item["content"][1]["file_id"], "file-1")
                     self.assertEqual(body, original)
         self.assertEqual(len(self.uploads), 1)
 
-    async def test_tool_attachment_messages_do_not_start_a_new_agent_turn(self):
+    async def test_tool_images_stay_in_results_without_starting_a_new_agent_turn(self):
         for stream in (False, True):
             with self.subTest(stream=stream):
                 body = self.image_body(stream=stream)
@@ -390,18 +449,38 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                         "output": [{"type": "input_image", "file_id": "file-existing"}],
                     },
                 ]
-                expected = excel_upstream.prepare_responses_body(body)["metadata"]
+                prepared = excel_upstream.prepare_responses_body(body)
+                self.assertEqual(prepared["metadata"], {"agent_iteration": "2"})
                 response = await self.local.post("/responses", json=body)
                 self.assertEqual(response.status_code, 200, response.text)
                 sent = self.requests[-1]
-                self.assertEqual(sent["metadata"], expected)
+                self.assertEqual(set(sent["metadata"]), {"task_id", "turn_id", "agent_iteration"})
+                self.assertRegex(sent["metadata"]["task_id"], r"^[0-9a-f]{64}$")
+                self.assertRegex(sent["metadata"]["turn_id"], r"^[0-9a-f]{64}$")
                 self.assertEqual(sent["metadata"]["agent_iteration"], "2")
-                self.assertEqual(sent["input"][-2]["type"], "function_call_output")
-                self.assertEqual(sent["input"][-2]["call_id"], "call_picture")
+                self.assertEqual(sent["model"], "gpt-6-astra")
+                self.assertEqual(sent["input"][-1]["type"], "function_call_output")
+                self.assertEqual(sent["input"][-1]["call_id"], "call_picture")
                 self.assertEqual(
-                    sent["input"][-1]["content"][2]["file_id"], "file-existing"
+                    sent["input"][-1]["output"][0]["file_id"], "file-existing"
                 )
+                self.assertEqual(len(sent["input"]), len(body["input"]) + 1)
                 self.assertEqual(self.uploads, [])
+
+    async def test_item_reference_is_rejected_before_upload_or_generation(self):
+        for path in ("/responses", "/v1/responses"):
+            for stream in (False, True):
+                with self.subTest(path=path, stream=stream):
+                    body = self.image_body(stream=stream)
+                    body["input"].append({"type": "item_reference", "id": "msg_earlier_answer"})
+                    response = await self.local.post(path, json=body)
+                    self.assertEqual(response.status_code, 400, response.text)
+                    error = response.json()["error"]
+                    self.assertEqual(error["param"], "input")
+                    self.assertIn("item_reference", error["message"])
+                    self.assertIn("full history", error["message"])
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.uploads, [])
 
     async def test_malformed_attributed_content_is_rejected_before_network_io(self):
         for content in (None, True, {"private": "DO-NOT-EXPOSE"}):
@@ -428,20 +507,22 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_and_tool_images_share_the_request_image_limit(self):
         body = self.image_body()
         body["input"][0].update(type="agent_message", author="/root/worker")
-        body["input"].append(
+        body["input"].extend([
+            {"type": "function_call", "name": "view_image", "call_id": "call_image", "arguments": "{}"},
             {
                 "type": "function_call_output",
                 "call_id": "call_image",
                 "output": [{"type": "input_image", "file_id": "file-existing"}],
-            }
-        )
+            },
+        ])
         with patch.object(excel_images, "MAX_IMAGES", 1):
             response = await self.local.post("/responses", json=body)
         self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("at most 1 images", response.text)
         self.assertEqual(self.requests, [])
         self.assertEqual(self.uploads, [])
 
-    async def test_two_image_conversations_share_upload_but_keep_separate_task_identity(
+    async def test_concurrent_image_conversations_share_upload_but_use_separate_slots(
         self,
     ):
         responses = await asyncio.gather(
@@ -457,6 +538,8 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             len({body["metadata"]["task_id"] for body in self.requests}), 2
         )
+        self.assertEqual(len({body["metadata"]["turn_id"] for body in self.requests}), 2)
+        self.assertTrue(all(body["model"] == "gpt-6-astra" for body in self.requests))
 
     async def test_image_continuation_reuses_file_and_preserves_history_prefix(self):
         body = self.image_body()
@@ -487,8 +570,12 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             self.requests[1]["metadata"]["task_id"],
             self.requests[0]["metadata"]["task_id"],
         )
+        self.assertNotEqual(
+            self.requests[1]["metadata"]["turn_id"],
+            self.requests[0]["metadata"]["turn_id"],
+        )
 
-    async def test_rejected_cached_file_is_uploaded_again_without_changing_turn_identity(
+    async def test_rejected_cached_file_is_uploaded_again_with_a_new_generation_turn(
         self,
     ):
         body = self.image_body()
@@ -502,7 +589,11 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.requests[-1]["input"][-1]["content"][1]["file_id"], "file-2"
         )
-        self.assertEqual(self.requests[0]["metadata"], self.requests[-1]["metadata"])
+        self.assertEqual(len({body["metadata"]["task_id"] for body in self.requests}), 1)
+        self.assertEqual(len({body["metadata"]["turn_id"] for body in self.requests}), 3)
+        self.assertTrue(all(body["metadata"]["agent_iteration"] == "1" for body in self.requests))
+        self.assertTrue(all(body["model"] == "gpt-6-astra" for body in self.requests))
+        self.assertEqual(self.requests[0]["input"], self.requests[1]["input"])
 
     async def test_failed_upload_preserves_status_without_sending_a_text_only_request(
         self,
@@ -551,7 +642,14 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             len({body["metadata"]["task_id"] for body in self.requests}), 2
         )
         for body in self.requests:
-            self.assertEqual(body["reasoning"], {"effort": "xhigh", "summary": "auto"})
+            self.assertEqual(body["model"], "gpt-6-astra")
+            self.assertEqual(body["reasoning_effort"], "xhigh")
+            self.assertNotIn("reasoning", body)
+        expected_keys = [
+            "bps-b38089605d9c0d8832ca46709968a27d",
+            "bps-47d2ff387a8ab9ba07f7d851f173324e",
+        ]
+        self.assertEqual({body["prompt_cache_key"] for body in self.requests}, set(expected_keys))
 
         for index, response in enumerate(responses):
             self.assertEqual(response.status_code, 200)
@@ -573,10 +671,11 @@ class ExcelRequestCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 for event in events
                 if event["type"] == "response.completed"
             )
-            self.assertEqual(completed["id"], f"conversation_{index}")
+            self.assertEqual(completed["id"], expected_keys[index])
+            self.assertEqual(completed["model"], "gpt-6-astra")
             item = completed["output"][0]
             self.assertEqual(item["summary"][0]["text"], deltas[0])
-            self.assertEqual(item["encrypted_content"], f"opaque_conversation_{index}")
+            self.assertEqual(item["encrypted_content"], f"opaque_{expected_keys[index]}")
             self.assertNotIn("Thinking process completed", response.text)
 
 

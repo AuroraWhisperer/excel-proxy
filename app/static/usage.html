@@ -18,9 +18,9 @@
       <div class="page-heading section-heading">
         <div class="toolbar">
           <span id="live-status" class="status" role="status">正在读取…</span
-          ><button id="import-accounts">导入 JSON</button
           ><button id="start-login" class="primary">登录添加账号</button
-          ><button id="auto-login">账号密码登录</button>
+          ><button id="auto-login">账号密码登录</button
+          ><button id="import-accounts">导入 JSON</button>
         </div>
         <input
           id="account-file"
@@ -39,7 +39,7 @@
         <div class="section-heading">
           <div class="session-title">
             <h2 id="accounts-heading">账号额度</h2>
-            <span id="account-count" class="muted">0 个</span>
+            <span id="account-count" class="count-badge muted">0 个</span>
             <p id="account-feedback" class="feedback" role="status"></p>
           </div>
           <div class="toolbar">
@@ -82,14 +82,13 @@
           </table>
         </div>
       </section>
-      <details
+      <section
         id="usage-details"
         class="content-panel usage-detail"
         aria-label="当前账号本期用量与费用"
       >
-        <summary>用量明细</summary>
         <div class="section-heading">
-          <div>
+          <div class="session-title">
             <h2>本期用量</h2>
             <p id="usage-scope" class="muted">
               仅统计此账号本期经服务发送的请求。
@@ -133,12 +132,12 @@
               <span id="cost-status" class="status" role="status"
                 >正在读取…</span
               >
+              <span class="hint"
+                >按本地参考单价估算，不代表实际扣费或订阅剩余额度。</span
+              >
             </div>
-            <span id="cost-period" class="muted">本期 · USD</span>
+            <span id="cost-period" class="period-badge muted">本期 · USD</span>
           </div>
-          <p class="muted">
-            按本地参考单价估算，不代表实际扣费或订阅剩余额度。
-          </p>
           <dl class="cost-breakdown">
             <div class="cost-sum">
               <dt>已计价合计</dt>
@@ -164,63 +163,70 @@
           <p id="cost-feedback" class="feedback" role="status">
             正在读取本期记录…
           </p>
-          <div
-            class="table-wrap"
-            role="region"
-            aria-label="按模型的费用与用量"
-            tabindex="0"
-          >
-            <table class="cost-table">
-              <thead>
-                <tr>
-                  <th scope="col">模型</th>
-                  <th scope="col">请求</th>
-                  <th scope="col">普通输入</th>
-                  <th scope="col">缓存读取</th>
-                  <th scope="col">输出</th>
-                  <th scope="col">估算费用</th>
-                </tr>
-              </thead>
-              <tbody id="cost-model-rows">
-                <tr>
-                  <td colspan="6" class="empty">正在加载…</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <details class="cost-rates">
-            <summary>参考单价与计算方式</summary>
-            <p class="hint">
-              单位：美元 / 百万
-              token，不保证与最新官方报价一致。普通输入不含缓存；输出已含推理
-              token。长上下文单价按单次输入量判断，与月累计用量无关。
-            </p>
-            <div
-              class="table-wrap"
-              role="region"
-              aria-label="模型参考单价"
-              tabindex="0"
-            >
-              <table class="cost-table">
-                <thead>
-                  <tr>
-                    <th scope="col">模型 / 适用范围</th>
-                    <th scope="col">普通输入</th>
-                    <th scope="col">缓存读取</th>
-                    <th scope="col">缓存写入</th>
-                    <th scope="col">输出</th>
-                  </tr>
-                </thead>
-                <tbody id="cost-rate-rows">
-                  <tr>
-                    <td colspan="5" class="empty">正在加载…</td>
-                  </tr>
-                </tbody>
-              </table>
+          <div class="cost-tables-grid">
+            <div class="cost-table-card">
+              <div class="cost-subhead">
+                <h3>按模型用量与费用</h3>
+              </div>
+              <div
+                class="table-wrap"
+                role="region"
+                aria-label="按模型的费用与用量"
+                tabindex="0"
+              >
+                <table class="cost-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">模型</th>
+                      <th scope="col">请求</th>
+                      <th scope="col">普通输入</th>
+                      <th scope="col">缓存读取</th>
+                      <th scope="col">输出</th>
+                      <th scope="col">估算费用</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cost-model-rows">
+                    <tr>
+                      <td colspan="6" class="empty">正在加载…</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </details>
+            <div class="cost-rates cost-table-card">
+              <div class="cost-subhead">
+                <h3>参考单价</h3>
+                <span class="hint"
+                  >美元 / 百万 token，不保证与最新官方报价一致（输出含推理）</span
+                >
+              </div>
+              <div
+                class="table-wrap"
+                role="region"
+                aria-label="模型参考单价"
+                tabindex="0"
+              >
+                <table class="cost-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">模型 / 适用范围</th>
+                      <th scope="col">普通输入</th>
+                      <th scope="col">缓存读取</th>
+                      <th scope="col">缓存写入</th>
+                      <th scope="col">输出</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cost-rate-rows">
+                    <tr>
+                      <td colspan="5" class="empty">正在加载…</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </section>
-      </details>
+      </section>
       <footer>账号额度以服务方记录为准。</footer>
     </main>
     <script src="/ui/usage.js"></script>

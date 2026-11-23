@@ -108,15 +108,8 @@ def _upstream_proxy_configured() -> bool:
     return bool(https_proxy or http_proxy)
 
 
-def _configured_upstream_tls_verify(proxy_configured: bool) -> tuple[bool, str]:
-    explicit = _optional_env_bool("GHCP_UPSTREAM_TLS_VERIFY")
-    if explicit is not None:
-        return explicit, "GHCP_UPSTREAM_TLS_VERIFY"
-    if proxy_configured:
-        # Enterprise HTTPS interception proxies often terminate TLS with an
-        # internal CA that isn't present in certifi-based trust stores.
-        return False, "proxy_default"
-    return True, "default"
+def _configured_upstream_tls_verify() -> bool:
+    return _optional_env_bool("GHCP_UPSTREAM_TLS_VERIFY") is not False
 
 
 def _configured_upstream_http2(proxy_configured: bool) -> tuple[bool, str]:
@@ -133,9 +126,36 @@ _UPSTREAM_CLIENT_LOCK = threading.Lock()
 _UPSTREAM_CLIENT_SHUTDOWN_REGISTERED = False
 
 
+class _WebSocketUpstreamClient(httpx.AsyncClient):
+    def __init__(self, *, mounts, **options):
+        super().__init__(mounts=mounts, **options)
+        self._websocket_origins = {}
+        for endpoint, transport in mounts.items():
+            origin = httpx.URL(endpoint)
+            if origin.scheme in {"ws", "wss"} and transport is not None:
+                self._websocket_origins[(origin.scheme, origin.host, origin.port)] = transport
+
+    def _transport_for_url(self, url):
+        if url.scheme not in {"ws", "wss"}:
+            return super()._transport_for_url(url)
+        # HTTPX 0.28.1 can sort NO_PROXY before origin mounts. Keep mounts for
+        # its transport lifecycle, but give exact WebSocket origins priority.
+        transport = self._websocket_origins.get((url.scheme, url.host, url.port))
+        if transport is not None:
+            return transport
+        for pattern, transport in self._mounts.items():
+            # HTTPX treats a missing mount port as a wildcard, unlike an origin.
+            if transport in self._websocket_origins.values():
+                continue
+            if pattern.matches(url):
+                return self._transport if transport is None else transport
+        return self._transport
+
+
 def _build_upstream_client(
     *,
     http2_override: bool | None = None,
+    mounts_for=None,
 ) -> "httpx.AsyncClient":
     proxy_aliases = _apply_upstream_proxy_env_aliases()
     if proxy_aliases:
@@ -144,20 +164,14 @@ def _build_upstream_client(
             flush=True,
         )
     proxy_configured = _upstream_proxy_configured()
-    tls_verify, tls_verify_source = _configured_upstream_tls_verify(proxy_configured)
+    tls_verify = _configured_upstream_tls_verify()
     if http2_override is None:
         upstream_http2, upstream_http2_source = _configured_upstream_http2(
             proxy_configured
         )
     else:
         upstream_http2, upstream_http2_source = http2_override, "client_override"
-    if not tls_verify and tls_verify_source == "proxy_default":
-        print(
-            "Upstream network forwarding detected: defaulting GHCP upstream TLS verification off. "
-            "Set GHCP_UPSTREAM_TLS_VERIFY=1 once a trusted network CA bundle is configured.",
-            flush=True,
-        )
-    elif not tls_verify:
+    if not tls_verify:
         print(
             "GHCP_UPSTREAM_TLS_VERIFY disabled: upstream TLS certificates will not be validated.",
             flush=True,
@@ -173,21 +187,13 @@ def _build_upstream_client(
         max_keepalive_connections=4,
         keepalive_expiry=300.0,
     )
+    mounts = mounts_for(tls_verify) if mounts_for else {}
+    client_type = _WebSocketUpstreamClient if mounts else httpx.AsyncClient
+    options = dict(timeout=timeout, limits=limits, verify=tls_verify, trust_env=True, mounts=mounts)
     try:
-        return httpx.AsyncClient(
-            http2=upstream_http2,
-            timeout=timeout,
-            limits=limits,
-            verify=tls_verify,
-            trust_env=True,
-        )
+        return client_type(http2=upstream_http2, **options)
     except (ImportError, RuntimeError):
-        return httpx.AsyncClient(
-            timeout=timeout,
-            limits=limits,
-            verify=tls_verify,
-            trust_env=True,
-        )
+        return client_type(**options)
 
 
 def _ensure_upstream_client_shutdown_registered() -> None:
@@ -197,14 +203,14 @@ def _ensure_upstream_client_shutdown_registered() -> None:
         _UPSTREAM_CLIENT_SHUTDOWN_REGISTERED = True
 
 
-def get_excel_upstream_client() -> "httpx.AsyncClient":
-    """Reuse the Excel HTTP/1.1 transport across requests."""
+def get_excel_upstream_client(*, mounts_for=None) -> "httpx.AsyncClient":
+    """Use WebSocket for generation and the shared HTTP pool for attachments and images."""
     global _EXCEL_UPSTREAM_CLIENT
     if _EXCEL_UPSTREAM_CLIENT is not None:
         return _EXCEL_UPSTREAM_CLIENT
     with _UPSTREAM_CLIENT_LOCK:
         if _EXCEL_UPSTREAM_CLIENT is None:
-            _EXCEL_UPSTREAM_CLIENT = _build_upstream_client(http2_override=False)
+            _EXCEL_UPSTREAM_CLIENT = _build_upstream_client(http2_override=False, mounts_for=mounts_for)
             _ensure_upstream_client_shutdown_registered()
     return _EXCEL_UPSTREAM_CLIENT
 

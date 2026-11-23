@@ -12,6 +12,7 @@ import excel_upstream
 import responses_protocol
 import proxy
 import rate_limiting
+import structured_output
 
 
 TITLE_FORMAT = {
@@ -97,13 +98,18 @@ class StructuredRequestTests(unittest.TestCase):
         )
         self.assertIn("JSON", instructions)
         self.assertIn(
-            json.dumps(TITLE_FORMAT, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(TITLE_FORMAT, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             instructions,
         )
 
     def test_invalid_formats_are_rejected_before_generation(self):
         invalid = [
             "json",
+            {},
+            {"schema": {"type": "array"}},
+            {"type": None},
+            {"type": ""},
+            {"type": []},
             {"type": "xml"},
             {"type": "json_schema", "name": "title"},
             {**TITLE_FORMAT, "strict": "true"},
@@ -113,14 +119,42 @@ class StructuredRequestTests(unittest.TestCase):
             {**TITLE_FORMAT, "schema": {"$ref": "file:///private/schema.json"}},
         ]
         for fmt in invalid:
-            with (
-                self.subTest(format=fmt),
-                self.assertRaises(excel_upstream.ExcelRequestError) as caught,
-            ):
-                excel_upstream.prepare_responses_body(
-                    {"input": "title", "text": {"format": fmt}}
-                )
-            self.assertEqual(caught.exception.param, "text.format")
+            with self.subTest(format=fmt):
+                with self.assertRaises(excel_upstream.ExcelRequestError) as caught:
+                    excel_upstream.prepare_responses_body(
+                        {"input": "title", "text": {"format": fmt}}
+                    )
+                self.assertEqual(caught.exception.param, "text.format")
+
+    def test_structured_instructions_match_the_reference_json_value_contract(self):
+        prompt = (
+            "The client requires a structured final answer. Your final assistant answer must be exactly one JSON value, with no Markdown fences or surrounding prose. "
+            "Tool calls and refusals remain separate protocol items; use the client tool transport as needed before the final answer. "
+            "The gateway validates the final JSON before returning it to the client."
+        )
+        self.assertEqual(structured_output.instructions({"type": "json_object"}), prompt)
+        fmt = structured_output.request_format({"text": {"format": {
+            "type": "json_schema", "name": "items", "schema": {"type": "array"},
+        }}})
+        self.assertEqual(
+            structured_output.instructions(fmt),
+            prompt + " The final answer must satisfy the schema in this output format: \n"
+            + json.dumps(fmt, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+
+    def test_schema_prompt_uses_reference_key_order_and_text_escaping(self):
+        fmt = {
+            "type": "json_schema", "name": "items",
+            "schema": {"type": "array", "description": "<&>\u2028\u2029中文"},
+        }
+        expected = (
+            '{"name":"items","schema":{"description":"\\u003c\\u0026\\u003e'
+            '\\u2028\\u2029中文","type":"array"},"type":"json_schema"}'
+        )
+        for value in (fmt, dict(reversed(list(fmt.items())))):
+            with self.subTest(order=list(value)):
+                prompt = structured_output.instructions(value)
+                self.assertEqual(prompt.rsplit("\n", 1)[-1], expected)
 
     def test_local_schema_references_and_metadata_summary_fields_are_supported(self):
         fmt = {
@@ -205,13 +239,6 @@ class StructuredHTTPTests(unittest.IsolatedAsyncioTestCase):
                         "chatgpt-account-id": "test-account",
                     }
                 ),
-            )
-        )
-        patches.enter_context(
-            patch.object(
-                excel_upstream.excel_session_store,
-                "tools_version_id",
-                return_value=None,
             )
         )
         patches.enter_context(patch.object(proxy, "_finish_usage_and_trace"))
@@ -323,6 +350,22 @@ class StructuredHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.output = [message("[]")]
         result = await self.request(fmt={"type": "json_object"})
         self.assertEqual(result.status_code, 502)
+
+    async def test_array_schema_is_validated_in_json_and_streaming_responses(self):
+        fmt = {"type": "json_schema", "name": "items", "schema": {
+            "type": "array", "items": {"type": "integer"},
+        }}
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self.output = [message("[1,2]")]
+                result = await self.request(fmt=fmt, stream=stream)
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertNotIn("UNVALIDATED_DELTA", result.text)
+                self.assertIn("[1,2]", result.text)
+                self.output = [message('["invalid"]')]
+                invalid = await self.request(fmt=fmt, stream=stream)
+                self.assertEqual(invalid.status_code, 200 if stream else 502)
+                self.assertIn("excel_invalid_structured_output", invalid.text)
 
     async def test_refusal_remains_a_refusal(self):
         self.output[0]["content"] = [

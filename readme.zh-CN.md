@@ -1,7 +1,3 @@
-# ⚠️ 此方法已于 2026 年 10 月 1 日失效
-
-下述通过 Excel/BPS 后端接入的方法已失效。仓库保留完整源码和安装说明，可用于本地安装、启动及研究；控制面板能打开不代表上游模型请求可用。
-
 <div align="center">
 
 <h1>Excel 连接服务</h1>
@@ -29,7 +25,7 @@
 服务负责将 Codex 请求转换后发往 Excel/BPS 后端，并流式返回回复和工具调用。文件读写、代码修改和命令执行仍由 Codex 完成。
 
 ```text
-Codex → 本机 Excel 连接服务 → OpenAI Excel/BPS 后端
+Codex → HTTP /v1/responses → 本机 Excel 连接服务 → WebSocket → OpenAI Excel/BPS
 ```
 
 ## 功能
@@ -77,9 +73,7 @@ py -3 -m venv .venv
 
 双击 **启动.vbs** 打开窗口：
 
-以下连接步骤保留为原有流程说明，仍受顶部的 10 月 1 日失效提示约束。
-
-1. 点击 **手动登录**，在官方授权窗口完成登录。
+1. 点击 **手动登录**，在打开的 OpenAI 授权页输入面板显示的设备码，确认 Excel 授权。
 2. 程序会用一次简短模型请求验证账号，消耗少量额度。验证通过后，自动启用账号、备份并更新 Codex 配置。
 3. 重启 Codex，开始新对话。
 
@@ -131,6 +125,7 @@ bash tools/install_macos.sh
 | --- | --- |
 | [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api) | Excel/Basispoints 协议适配、工具历史与整批校验、工具传输恢复、图片容量限制。 |
 | [Kaixxrua/excel-codex-bridge](https://github.com/Kaixxrua/excel-codex-bridge) | 本机 Codex 与 Excel 的桥接、本地访问保护、客户端工具转换、附件上传与错误处理。 |
+| [sunboyzoey/bps-local-public](https://github.com/sunboyzoey/bps-local-public) | BPS WebSocket 生成协议、设备码授权、生成排队与启动限速。 |
 
 具体参考版本和适配范围见[参考项目与改进](docs/参考项目与改进.md)。
 

@@ -19,7 +19,12 @@ from excel_stream import (
     completed_response as _excel_completed_response,
     extract_upstream_json_payload as _extract_upstream_json_payload,
 )
-from rate_limiting import throttled_client_send
+from rate_limiting import (
+    AdmittedStream,
+    GenerationQueueError,
+    throttled_client_send,
+    wait_for_downstream_disconnect,
+)
 from request_diagnostics import trace_hash as _trace_hash
 from upstream_request import UpstreamRequestPlan
 from usage_tracking import UsageTracker
@@ -52,7 +57,7 @@ class GracefulStreamingResponse(StreamingResponse):
 
 @dataclass
 class _ActiveResponsesStream:
-    identity: tuple[str, str]
+    identity: tuple[str, str, str]
     request_id: str
     sequence: int
     plan: UpstreamRequestPlan
@@ -77,13 +82,14 @@ class _ResponsesSupersessionBlocked(RuntimeError):
 
 
 _ACTIVE_RESPONSES_STREAMS_LOCK = threading.Lock()
+_CONFIRMED_TRANSPORT_CLOSES = {"websocket_close", "http2_rst_cancel", "http1_connection_close"}
 
 
 _ACTIVE_RESPONSES_STREAM_SEQUENCE = 0
 
 
 _ACTIVE_RESPONSES_STREAMS: dict[
-    tuple[str, str],
+    tuple[str, str, str],
     dict[str, _ActiveResponsesStream],
 ] = {}
 
@@ -156,7 +162,7 @@ def _responses_plan_uses_native_upstream(plan: "UpstreamRequestPlan | None") -> 
 
 def _responses_active_stream_identity(
     plan: "UpstreamRequestPlan | None",
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     if not _responses_plan_uses_native_upstream(plan) or not isinstance(
         plan, UpstreamRequestPlan
     ):
@@ -198,7 +204,11 @@ def _responses_active_stream_identity(
     if explicit_affinity is None:
         return None
     lineage = _responses_plan_lineage(plan)
-    return "responses", lineage or _trace_hash(explicit_affinity)
+    account = _responses_plan_header_value(plan, "chatgpt-account-id") or _responses_plan_header_value(
+        plan, "x-openai-account-id"
+    )
+    user = _responses_plan_header_value(plan, "x-openai-account-user-id")
+    return account or "", user or "", lineage or _trace_hash(explicit_affinity)
 
 
 def _httpcore_http2_stream(upstream: httpx.Response):
@@ -212,6 +222,8 @@ def _httpcore_http2_stream(upstream: httpx.Response):
     if http_version not in {b"HTTP/2", "HTTP/2"}:
         return None
     bound_stream = getattr(upstream, "stream", None)
+    if isinstance(bound_stream, AdmittedStream):
+        bound_stream = bound_stream.inner
     transport_stream = getattr(bound_stream, "_stream", None)
     pool_stream = getattr(transport_stream, "_httpcore_stream", None)
     core_stream = getattr(pool_stream, "_stream", None)
@@ -271,6 +283,8 @@ async def _close_upstream_response(
         return "http2_rst_cancel"
     if close_failed:
         return "response_close_failed"
+    if cancel_generation and upstream.extensions.get("excel_websocket"):
+        return "websocket_close"
     if cancel_generation and http_version in {
         b"HTTP/1.0",
         b"HTTP/1.1",
@@ -734,12 +748,14 @@ class _ManagedResponsesStreamBody:
         if http_version in {b"HTTP/2", "HTTP/2"}:
             reset_sent, reset_status = await _reset_http2_upstream_stream(self.upstream)
             mode = "http2_rst_cancel" if reset_sent else f"http2_reset_{reset_status}"
-        elif http_version in {b"HTTP/1.0", b"HTTP/1.1", "HTTP/1.0", "HTTP/1.1"}:
+        elif self.upstream.extensions.get("excel_websocket") or http_version in {
+            b"HTTP/1.0", b"HTTP/1.1", "HTTP/1.0", "HTTP/1.1"
+        }:
             mode = await _close_upstream_response(
                 self.upstream,
                 cancel_generation=True,
             )
-            reset_sent = mode == "http1_connection_close"
+            reset_sent = mode in _CONFIRMED_TRANSPORT_CLOSES
         else:
             mode = "cancel_transport_unconfirmed"
             reset_sent = False
@@ -850,10 +866,7 @@ class _ManagedResponsesStreamBody:
                 # Lifecycle state still must be committed synchronously.
                 transport_close = "transport_close_cancelled"
 
-            transport_cancel_confirmed = transport_close in {
-                "http2_rst_cancel",
-                "http1_connection_close",
-            }
+            transport_cancel_confirmed = transport_close in _CONFIRMED_TRANSPORT_CLOSES
             teardown_confirmed = generation_ended or transport_cancel_confirmed
             lifecycle = {
                 "termination_cause": cause,
@@ -956,14 +969,6 @@ class _DownstreamDisconnectedBeforeResponse(RuntimeError):
         self.transport_close = transport_close
 
 
-async def _wait_for_downstream_disconnect(request: Request) -> None:
-    """Wait on the ASGI receive channel after the request body was consumed."""
-    while True:
-        message = await request.receive()
-        if message.get("type") == "http.disconnect":
-            return
-
-
 async def _open_streaming_upstream(
     client: httpx.AsyncClient,
     request: httpx.Request,
@@ -981,20 +986,27 @@ async def _open_streaming_upstream(
     the actual wire stream instead of abandoning an untracked generation.
     """
     send_started = False
+    closing = False
+
+    def set_send_state(sending):
+        nonlocal send_started
+        send_started = sending
+        if trace_plan is not None and trace_plan.on_send_state is not None:
+            trace_plan.on_send_state(sending)
+        if active_stream is not None:
+            active_stream.send_started = sending
+        if closing and not sending:
+            raise _DownstreamDisconnectedBeforeResponse("not_sent")
 
     async def open_upstream() -> httpx.Response:
-        nonlocal send_started
-        send_started = True
-        if active_stream is not None:
-            active_stream.send_started = True
-        upstream = await throttled_client_send(client, request, stream=True)
+        upstream = await throttled_client_send(client, request, stream=True, on_send_state=set_send_state)
         if active_stream is not None:
             active_stream.upstream = upstream
         return upstream
 
     upstream_task = asyncio.create_task(open_upstream())
     disconnect_task = (
-        asyncio.create_task(_wait_for_downstream_disconnect(downstream_request))
+        asyncio.create_task(wait_for_downstream_disconnect(downstream_request))
         if downstream_request is not None
         else None
     )
@@ -1014,6 +1026,7 @@ async def _open_streaming_upstream(
                     pass
             return await upstream_task
 
+        closing = True
         if not send_started:
             upstream_task.cancel()
             with CancelScope(shield=True):
@@ -1038,6 +1051,7 @@ async def _open_streaming_upstream(
     except asyncio.CancelledError:
         # Preserve the same ownership guarantee if the ASGI server cancels the
         # route task directly instead of delivering http.disconnect.
+        closing = True
         with CancelScope(shield=True):
             if not send_started:
                 upstream_task.cancel()
@@ -1086,7 +1100,10 @@ async def relay_streaming_response(
     try:
         await _supersede_active_responses_streams(trace_plan, active_stream)
         client = upstream_client or get_upstream_client()
-        request = client.build_request("POST", upstream_url, headers=headers, json=body)
+        request = client.build_request(
+            "POST", upstream_url, headers=headers, json=body,
+            extensions={"excel_body": body},
+        )
         try:
             upstream = await _open_streaming_upstream(
                 client,
@@ -1116,11 +1133,7 @@ async def relay_streaming_response(
             )
         return responses_protocol.openai_error_response(status_code, message)
     except _DownstreamDisconnectedBeforeResponse as exc:
-        teardown_confirmed = exc.transport_close in {
-            "http2_rst_cancel",
-            "http1_connection_close",
-            "not_sent",
-        }
+        teardown_confirmed = exc.transport_close == "not_sent" or exc.transport_close in _CONFIRMED_TRANSPORT_CLOSES
         if active_stream is not None:
             active_stream.cancel_requested = True
         if isinstance(trace_plan, UpstreamRequestPlan) and isinstance(
@@ -1157,10 +1170,7 @@ async def relay_streaming_response(
                     active_stream.upstream,
                     cancel_generation=True,
                 )
-                teardown_confirmed = transport_cancel in {
-                    "http2_rst_cancel",
-                    "http1_connection_close",
-                }
+                teardown_confirmed = transport_cancel in _CONFIRMED_TRANSPORT_CLOSES
             elif active_stream.send_started:
                 transport_cancel = "pre_response_cancel_unconfirmed"
         try:
@@ -1176,7 +1186,8 @@ async def relay_streaming_response(
         status_code, message = (
             responses_protocol.upstream_request_error_status_and_message(exc)
         )
-        teardown_confirmed = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+        local_queue = isinstance(exc, GenerationQueueError)
+        teardown_confirmed = local_queue or isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
         try:
             dependencies.finish_usage_and_trace(
                 trace_plan, status_code, response_text=message, error=exc
@@ -1185,11 +1196,17 @@ async def relay_streaming_response(
             _complete_active_responses_teardown(
                 active_stream,
                 transport_cancel=(
-                    "connect_failed_before_request"
+                    "not_sent_local_queue"
+                    if local_queue
+                    else "connect_failed_before_request"
                     if teardown_confirmed
                     else "pre_response_request_error_unconfirmed"
                 ),
                 confirmed=teardown_confirmed,
+            )
+        if local_queue:
+            return responses_protocol.openai_error_response(
+                status_code, message, code=exc.code, headers=exc.headers
             )
         return responses_protocol.openai_error_response(status_code, message)
     except Exception:
@@ -1219,10 +1236,7 @@ async def relay_streaming_response(
                 upstream,
                 cancel_generation=True,
             )
-            transport_confirmed = transport_cancel in {
-                "http2_rst_cancel",
-                "http1_connection_close",
-            }
+            transport_confirmed = transport_cancel in _CONFIRMED_TRANSPORT_CLOSES
             if isinstance(trace_plan, UpstreamRequestPlan) and isinstance(
                 trace_plan.trace_context, dict
             ):
@@ -1253,10 +1267,7 @@ async def relay_streaming_response(
                 upstream,
                 cancel_generation=True,
             )
-            transport_confirmed = transport_cancel in {
-                "http2_rst_cancel",
-                "http1_connection_close",
-            }
+            transport_confirmed = transport_cancel in _CONFIRMED_TRANSPORT_CLOSES
             if isinstance(trace_plan, UpstreamRequestPlan) and isinstance(
                 trace_plan.trace_context, dict
             ):
@@ -1328,11 +1339,7 @@ async def relay_streaming_response(
             _complete_active_responses_teardown(
                 active_stream,
                 transport_cancel=transport_cancel,
-                confirmed=transport_cancel
-                in {
-                    "http2_rst_cancel",
-                    "http1_connection_close",
-                },
+                confirmed=transport_cancel in _CONFIRMED_TRANSPORT_CLOSES,
             )
         raise
     if active_stream is not None:

@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import excel_upstream
 import excel_tool_catalog
-import excel_tool_transport
 import excel_tool_history
 import responses_protocol
 import test_excel_contracts
@@ -37,13 +36,34 @@ def transport(envelope, name="run_officejs"):
 
 
 class ExcelToolCompatibilityTests(unittest.TestCase):
+    def assert_rebuilt_call(self, rebuilt, client_call):
+        self.assertEqual(rebuilt["type"], "function_call")
+        self.assertEqual(rebuilt["name"], "run_officejs")
+        self.assertEqual(rebuilt["call_id"], client_call["call_id"])
+        self.assertEqual(rebuilt["status"], "completed")
+        arguments = json.loads(rebuilt["arguments"])
+        name = client_call["name"]
+        namespace = client_call.get("namespace")
+        if namespace and not name.startswith(namespace + "."):
+            name = namespace + "." + name
+        if client_call["type"] == "custom_tool_call":
+            self.assertEqual(json.loads(arguments["code"]), {
+                "name": name, "input": client_call["input"],
+            })
+        else:
+            self.assertEqual(json.loads(arguments["code"]), {
+                "name": name, "arguments": json.loads(client_call["arguments"]),
+            })
+        self.assertFalse(arguments["destructive"])
+        self.assertEqual(arguments["references"], [])
+
     def test_compatible_duplicate_tools_keep_one_current_catalog_entry(self):
         for alias in ("parameters", "inputSchema", "input_schema"):
             with self.subTest(alias=alias):
                 current = {**FUNCTION_TOOL, "description": "Current declaration"}
                 older = {
-                    "type": "Function",
-                    "name": " exec_command ",
+                    "type": "function",
+                    "name": "exec_command",
                     alias: copy.deepcopy(FUNCTION_TOOL["parameters"]),
                     "description": "Older declaration",
                     "defer_loading": True,
@@ -54,7 +74,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
                 self.assertEqual(len(specs), 1)
                 self.assertEqual(specs["exec_command"]["spec"], current)
                 prompt = excel_tool_catalog._client_tool_protocol_instructions(source)
-                self.assertEqual(prompt.count('"name":"exec_command"'), 1)
+                self.assertEqual(prompt.count('Client tool "exec_command" (function).'), 1)
                 self.assertIn("Current declaration", prompt)
                 self.assertNotIn("Older declaration", prompt)
                 invalid = transport({"name": "exec_command", "arguments": {"cmd": 7}})
@@ -78,7 +98,6 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             {"type": "custom"},
             {"parameters": {"type": "object"}},
             {"strict": True},
-            {"encrypted": True},
         ):
             with self.subTest(changes=changes):
                 source = {
@@ -140,7 +159,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             ]
         }
         prompt = excel_tool_catalog._client_tool_protocol_instructions(source)
-        self.assertEqual(prompt.count('"name":"functions.apply_patch"'), 1)
+        self.assertEqual(prompt.count('Client tool "functions.apply_patch" (custom).'), 1)
         native = transport({"name": "functions.apply_patch", "input": PATCH_TEXT})
         call = excel_upstream.extract_native_client_tool_call(
             {"output": [native]}, source
@@ -149,7 +168,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             (call["name"], call["namespace"]), ("apply_patch", "functions")
         )
-        self.assertEqual(excel_upstream.translate_input_items([call]), [native])
+        self.assert_rebuilt_call(excel_upstream.translate_input_items([call])[0], call)
 
     def test_reused_call_id_does_not_substitute_another_calls_arguments(self):
         native = transport(
@@ -167,7 +186,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
                 envelope = json.loads(json.loads(replay[0]["arguments"])["code"])
                 self.assertEqual(envelope["arguments"], {"cmd": "read account-b.txt"})
 
-    def test_semantically_equal_history_preserves_exact_native_item(self):
+    def test_history_rebuild_preserves_client_arguments_without_cached_native_fields(self):
         native = transport(
             {"name": "files.read", "arguments": {"n": 9007199254740993, "path": "a"}}
         )
@@ -186,14 +205,18 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
         )
         call["arguments"] = ' { "path": "a", "n": 9007199254740993 } '
         call["id"] = "client-rewritten-id"
-        with patch.object(excel_tool_transport, "_remember_native_calls") as remember:
-            self.assertEqual(excel_upstream.translate_input_items([call]), [native])
+        excel_tool_history.remember_native_call(native)
+        with patch.object(excel_tool_history, "remember_native_calls") as remember:
+            rebuilt = excel_upstream.translate_input_items([call])[0]
+        self.assert_rebuilt_call(rebuilt, call)
+        self.assertNotIn("references", rebuilt)
+        self.assertNotEqual(rebuilt["id"], native["id"])
         remember.assert_not_called()
         call["arguments"] = '{"path":"a","n":9007199254740992}'
-        self.assertNotEqual(excel_upstream.translate_input_items([call]), [native])
+        self.assert_rebuilt_call(excel_upstream.translate_input_items([call])[0], call)
         call["arguments"] = '{"path":"a","n":9007199254740993}'
         call["namespace"] = "other"
-        self.assertNotEqual(excel_upstream.translate_input_items([call]), [native])
+        self.assert_rebuilt_call(excel_upstream.translate_input_items([call])[0], call)
 
     def test_custom_history_collision_preserves_the_supplied_input(self):
         native = transport({"name": "apply_patch", "input": PATCH_TEXT})
@@ -202,8 +225,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
         replay = excel_upstream.translate_input_items(
             [changed], {"apply_patch": "custom"}
         )
-        envelope = json.loads(json.loads(replay[0]["arguments"])["code"])
-        self.assertEqual(envelope["input"], changed["input"])
+        self.assert_rebuilt_call(replay[0], changed)
 
     def test_rejected_batch_does_not_change_the_replay_cache(self):
         valid = transport({"name": "exec_command", "arguments": {"cmd": "pwd"}})
@@ -213,7 +235,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             "id": "fc_invalid",
             "arguments": "broken",
         }
-        with patch.object(excel_tool_transport, "_remember_native_calls") as remember:
+        with patch.object(excel_tool_history, "remember_native_calls") as remember:
             self.assertIsNone(
                 excel_upstream.extract_native_client_tool_calls(
                     {"output": [valid, invalid]},
@@ -241,7 +263,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
         replay = excel_upstream.translate_input_items(
             [call], {"exec_command": "function"}
         )
-        self.assertEqual(replay, [original])
+        self.assert_rebuilt_call(replay[0], call)
         self.assertIsNone(self.convert(native, []))
 
     def test_exact_catalog_name_wins_over_prefix_alias(self):
@@ -289,8 +311,8 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             ],
             {"update_plan": "function"},
         )
-        self.assertEqual(replay[0], native)
-        self.assertEqual(json.loads(replay[1]["output"]), {"status": "ok"})
+        self.assert_rebuilt_call(replay[0], call)
+        self.assertEqual(replay[1]["output"], "Plan updated")
 
     def test_patch_argument_wrapper_preserves_exact_input_and_replay(self):
         for outer_name in ("run_officejs", "functions.run_officejs"):
@@ -317,9 +339,10 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
                         ],
                         {"apply_patch": "custom"},
                     )
-                    self.assertEqual(replay[0], original)
+                    self.assert_rebuilt_call(replay[0], call)
                     self.assertEqual(replay[1]["type"], "function_call_output")
                     self.assertEqual(replay[1]["output"], "patch applied")
+                    self.assertEqual(native, original)
 
     def test_ambiguous_patch_wrappers_are_rejected(self):
         envelopes = [
@@ -350,7 +373,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             ],
             {"apply_patch": "custom"},
         )
-        self.assertEqual(replay[0], native)
+        self.assert_rebuilt_call(replay[0], call)
         self.assertEqual(replay[1]["type"], "function_call_output")
 
     def test_batch_rejection_identifies_stage_without_argument_values(self):
@@ -504,7 +527,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
                         ],
                         {"exec_command": "function"},
                     )
-                    self.assertEqual(replay[0], original)
+                    self.assert_rebuilt_call(replay[0], call)
                     self.assertEqual(replay[1]["output"], "done")
                     self.assertEqual(native, original)
 
@@ -529,7 +552,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             ],
             {"plugin.apply_patch": "custom"},
         )
-        self.assertEqual(replay[0], native)
+        self.assert_rebuilt_call(replay[0], call)
         self.assertEqual(replay[1]["type"], "function_call_output")
         self.assertEqual(replay[1]["output"], "patched")
 
@@ -665,7 +688,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
                         ],
                         {tool["name"]: tool["type"]},
                     )
-                    self.assertEqual(replay[0], original)
+                    self.assert_rebuilt_call(replay[0], call)
                     self.assertEqual(replay[1]["output"], "done")
                     self.assertEqual(native, original)
 
@@ -755,17 +778,14 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
                 native["arguments"] = json.dumps({"code": code})
                 self.assertIsNone(self.convert(native, [FUNCTION_TOOL]))
 
-    def test_protocol_reminder_respects_serial_tool_requests(self):
-        source = {"tools": [FUNCTION_TOOL], "parallel_tool_calls": False}
-        reminder = excel_upstream._client_tool_protocol_reminder(source)
-        self.assertIn("at most one tool call per response", reminder)
-        self.assertIn("wait for its result", reminder)
-        self.assertNotIn(
-            "at most one tool call per response",
-            excel_upstream._client_tool_protocol_reminder(
-                {**source, "parallel_tool_calls": True}
-            ),
-        )
+    def test_protocol_requests_one_tool_with_either_parallel_preference(self):
+        for parallel in (False, True):
+            with self.subTest(parallel=parallel):
+                prompt = excel_tool_catalog._client_tool_protocol_instructions({
+                    "tools": [FUNCTION_TOOL], "parallel_tool_calls": parallel,
+                })
+                self.assertIn("Call one client tool at a time", prompt)
+                self.assertIn("including update_plan through this transport", prompt)
 
     def test_split_native_transport_namespace_replays_custom_result(self):
         native = {
@@ -785,7 +805,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
             ],
             {"apply_patch": "custom"},
         )
-        self.assertEqual(replay[0], native)
+        self.assert_rebuilt_call(replay[0], call)
         self.assertEqual(replay[1]["type"], "function_call_output")
 
     def test_namespaced_custom_tool_preserves_output_and_replay_identity(self):
@@ -797,8 +817,7 @@ class ExcelToolCompatibilityTests(unittest.TestCase):
         self.assertEqual(call["namespace"], "plugin")
         self.assertEqual(call["input"], PATCH_TEXT)
         rebuilt = excel_upstream._fallback_transport_call(call)
-        envelope = json.loads(json.loads(rebuilt["arguments"])["code"])
-        self.assertEqual(envelope, {"name": "plugin.apply_patch", "input": PATCH_TEXT})
+        self.assert_rebuilt_call(rebuilt, call)
 
     def test_history_does_not_treat_plugin_plan_as_native_plan(self):
         original = {"client_plan": "keep exact arguments"}

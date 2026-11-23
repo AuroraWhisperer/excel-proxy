@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import excel_upstream
-import excel_tool_transport
+import excel_tool_history
 import tool_schema
 from test_excel_tool_compatibility import transport
 
@@ -124,7 +124,7 @@ class ToolSchemaTests(unittest.TestCase):
         invalid = transport({"name": "bounded", "arguments": {"count": 99}})
         invalid.update(id="fc_invalid", call_id="call_invalid")
         diagnostics = {}
-        with patch.object(excel_tool_transport, "_remember_native_calls") as remember:
+        with patch.object(excel_tool_history, "remember_native_calls") as remember:
             self.assertIsNone(
                 excel_upstream.extract_native_client_tool_calls(
                     {"output": [valid, invalid]},
@@ -138,7 +138,7 @@ class ToolSchemaTests(unittest.TestCase):
 
     def test_declared_false_schema_rejects_function_calls(self):
         native = transport({"name": "disabled", "arguments": {}})
-        with patch.object(excel_tool_transport, "_remember_native_calls") as remember:
+        with patch.object(excel_tool_history, "remember_native_calls") as remember:
             self.assertIsNone(
                 excel_upstream.extract_native_client_tool_call(
                     {"output": [native]},

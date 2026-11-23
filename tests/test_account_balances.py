@@ -461,9 +461,6 @@ class AccountBalanceRouteTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 proxy.proxy_accounts.proxy_account_store, "activate"
             ) as activate,
-            patch.object(
-                proxy.excel_upstream.excel_session_store, "configure"
-            ) as configure,
         ):
             response = await self.client.post(
                 f"/api/account-balances/{second}/test", json={}
@@ -484,7 +481,6 @@ class AccountBalanceRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send.call_args.args[1]["tool_choice"], "none")
         self.assertNotIn("secret", response.text)
         activate.assert_not_called()
-        configure.assert_not_called()
         self.assertEqual(len(balances.balance_store.snapshot()["accounts"]), 2)
 
     async def test_connection_preserves_http_failures_without_leaking_upstream_body(
@@ -568,13 +564,9 @@ class AccountBalanceRouteTests(unittest.IsolatedAsyncioTestCase):
             send.assert_not_called()
 
     async def test_import_get_rate_and_remove(self):
-        with patch.object(
-            proxy.excel_upstream.excel_session_store, "configure"
-        ) as configure:
-            response = await self.client.post(
-                "/api/account-balances/import", json=account()
-            )
-            configure.assert_not_called()
+        response = await self.client.post(
+            "/api/account-balances/import", json=account()
+        )
         self.assertEqual(response.status_code, 200)
         record_id = response.json()["accounts"][0]["id"]
         self.assertNotIn("test-secret", response.text)

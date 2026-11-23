@@ -10,6 +10,7 @@ import excel_responses
 import excel_upstream
 import responses_protocol
 import proxy
+import rate_limiting
 import upstream_errors
 import usage_tracking
 import test_excel_contracts
@@ -141,9 +142,13 @@ class CallDiagnosisTests(unittest.TestCase):
                 "model": excel_upstream.MODEL_ID,
                 "input": "test",
                 "tools": [FUNCTION_TOOL],
-                "metadata": {"agent_iteration": "7"},
             }
         )
+        body["metadata"] = {
+            "task_id": "admitted-task",
+            "turn_id": "previous-turn",
+            "agent_iteration": "7",
+        }
         original = copy.deepcopy(body)
         native = transport({})
         native["arguments"] = json.dumps({"code": "echo original"})
@@ -565,6 +570,21 @@ class ToolRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(recovery["mode"], "unknown_tool_regeneration")
                     self.assertEqual(recovery["outcome"], "succeeded")
                     self.assertEqual(recovery["usage"]["total_tokens"], 26)
+                    self.assertEqual(
+                        recovery["upstream_identity"],
+                        {
+                            key: retry["metadata"][key]
+                            for key in ("task_id", "turn_id", "agent_iteration")
+                        },
+                    )
+                    self.assertNotEqual(
+                        recovery["upstream_identity"]["turn_id"],
+                        first["metadata"]["turn_id"],
+                    )
+                    self.assertEqual(
+                        self.finish.call_args.args[0].body["metadata"],
+                        first["metadata"],
+                    )
                     if stream:
                         self.assertEqual(
                             result.text.count(
@@ -828,6 +848,29 @@ class ToolRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("excel_rate_limited", result.text)
                 self.assertEqual(self.finish.call_args.args[1], 429)
 
+    async def test_repair_blocked_before_send_has_no_upstream_identity(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self.requests.clear()
+                self.serve([[self.malformed()]])
+                with patch.object(
+                    rate_limiting,
+                    "throttle_upstream_request",
+                    side_effect=[
+                        None,
+                        rate_limiting.GenerationQueueError(
+                            "excel_queue_timeout", "Timed out before repair generation."
+                        ),
+                    ],
+                ):
+                    result = await self.request(stream)
+                self.assertEqual(len(self.requests), 1)
+                self.assertIn("excel_queue_timeout", result.text)
+                recovery = self.finish.call_args.args[0].trace_context[
+                    "tool_call_recovery"
+                ]
+                self.assertNotIn("upstream_identity", recovery)
+
     async def test_correction_401_does_not_replay_the_already_accepted_generation(self):
         self.serve([[self.malformed()], 401])
         with patch.object(
@@ -857,4 +900,12 @@ class ToolRecoveryHTTPTests(unittest.IsolatedAsyncioTestCase):
                     ]
                     self.assertEqual(
                         recovery["failure_diagnosis"]["category"], category
+                    )
+                    retry = json.loads(self.requests[-1].content)
+                    self.assertEqual(
+                        recovery["upstream_identity"],
+                        {
+                            key: retry["metadata"][key]
+                            for key in ("task_id", "turn_id", "agent_iteration")
+                        },
                     )

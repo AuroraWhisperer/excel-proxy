@@ -321,6 +321,14 @@ class ProxyAccountStoreTests(unittest.TestCase):
         )
         self.assertEqual(headers["x-basispoints-auth-mode"], "chatgpt")
 
+    def test_bps_refresh_preserves_client_id_across_rotation(self):
+        payload = {**credential(expires=time.time() + 30), "client_id": accounts.bps_device_auth.CLIENT_ID}
+        first = self.add(payload)
+        with patch.object(accounts, "refresh_credentials", return_value=credential(refresh="rotated")) as refresh:
+            self.store.headers_for(first)
+        refresh.assert_called_once_with("refresh-secret", client_id=accounts.bps_device_auth.CLIENT_ID)
+        self.assertEqual(self.store._accounts[first]["client_id"], accounts.bps_device_auth.CLIENT_ID)
+
     def test_refresh_cannot_change_account(self):
         first = self.add(credential(expires=time.time() + 30))
         with patch.object(
@@ -489,9 +497,29 @@ class ProxyAccountStoreTests(unittest.TestCase):
         self.store.activate(second, self.store.headers_for(second)["authorization"])
         with patch.object(accounts, "refresh_credentials") as refresh:
             self.assertIsNone(self.store.refresh_after_unauthorized(rejected))
-            self.store.use_excel()
+            self.store.remove(second)
             self.assertIsNone(self.store.refresh_after_unauthorized(rejected))
         refresh.assert_not_called()
+
+    def test_legacy_excel_source_migrates_to_none_on_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "accounts.dpapi"
+            raw = json.dumps(
+                {
+                    "version": 1,
+                    "accounts": [],
+                    "pending": [],
+                    "active_id": None,
+                    "source": "excel",
+                }
+            ).encode()
+            path.write_bytes(raw)
+            with patch.object(
+                accounts, "_unprotect_windows_data", side_effect=lambda data: data
+            ):
+                snapshot = accounts.ProxyAccountStore(path).snapshot()
+        self.assertEqual(snapshot["source"], "none")
+        self.assertIsNone(snapshot["active_id"])
 
     def test_rejected_token_without_refresh_grant_requires_login(self):
         first = self.add(credential(refresh=""))
@@ -712,7 +740,7 @@ class ProxyAuthenticationHTTPTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn("run_officejs", result.text)
                         self.assertEqual(len(self.requests), 1)
 
-    async def test_401_renews_same_account_and_retries_identical_request_once(self):
+    async def test_401_renews_same_account_and_retries_once_with_a_fresh_turn(self):
         for stream in (False, True):
             with self.subTest(stream=stream):
                 self.requests.clear()
@@ -725,7 +753,17 @@ class ProxyAuthenticationHTTPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.status_code, 200, result.text)
                 self.assertIn("OK", result.text)
                 self.assertEqual(len(self.requests), 2)
-                self.assertEqual(self.requests[0].content, self.requests[1].content)
+                original, retried = [json.loads(req.content) for req in self.requests]
+                self.assertEqual(original["model"], "gpt-5.6-sol")
+                self.assertEqual(
+                    original["metadata"]["task_id"], retried["metadata"]["task_id"]
+                )
+                original_turn = original["metadata"].pop("turn_id")
+                retried_turn = retried["metadata"].pop("turn_id")
+                self.assertRegex(original_turn, r"^[0-9a-f]{64}$")
+                self.assertRegex(retried_turn, r"^[0-9a-f]{64}$")
+                self.assertNotEqual(original_turn, retried_turn)
+                self.assertEqual(original, retried)
                 self.assertEqual(
                     self.requests[1].headers["authorization"],
                     "Bearer " + replacement["access_token"],
@@ -1009,22 +1047,12 @@ class ProxyAccountRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.json()["warnings"])
         self.assertNotIn("private-location", response.text)
 
-    async def test_direct_headers_and_status_never_read_excel_cache(self):
-        with (
-            patch.object(
-                proxy.excel_session_capture, "refresh_windows_excel_session"
-            ) as windows,
-            patch.object(
-                proxy.excel_session_capture, "refresh_macos_excel_session"
-            ) as mac,
-        ):
-            headers = await proxy._selected_excel_headers(stream=True)
-            status = await self.client.get("/api/config/excel-session")
+    async def test_direct_headers_and_status_use_oauth_account(self):
+        headers = await proxy._selected_excel_headers(stream=True)
+        status = await self.client.get("/api/config/excel-session")
         self.assertEqual(headers["chatgpt-account-id"], "account-a")
         self.assertEqual(headers["accept"], "text/event-stream")
         self.assertEqual(status.json()["source"], "oauth")
-        windows.assert_not_called()
-        mac.assert_not_called()
 
     async def test_remove_active_keeps_proxy_disabled(self):
         result = await self.client.delete("/api/proxy-accounts/" + self.first)

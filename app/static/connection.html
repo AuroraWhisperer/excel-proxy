@@ -27,165 +27,201 @@
           class="setup-panel direct-connection"
           aria-labelledby="session-heading"
         >
-          <div class="session-title">
-            <h2 id="session-heading">Excel 连接</h2>
-            <span id="session-status" class="status" role="status"
-              >正在读取…</span
-            >
-          </div>
-          <p id="session-copy" class="session-copy muted">
-            选择一种方式登录 ChatGPT 账号。
-          </p>
-          <div class="login-methods">
-            <div class="login-method">
-              <button
-                id="login-proxy"
-                class="primary"
-                aria-describedby="browser-login-hint"
-                disabled
-              >手动登录</button>
-              <span class="login-help">
-                <button type="button" class="login-help-trigger" aria-label="手动登录说明" aria-describedby="browser-login-hint">?</button>
-                <span id="browser-login-hint" class="login-tooltip" role="tooltip">
-                  打开官方页面，手动完成登录。通过连接测试后启用账号并配置 Codex；测试会消耗少量额度，失败保留原连接。
-                </span>
-              </span>
-            </div>
-            <div class="login-method">
-              <button
-                id="auto-login-proxy"
-                aria-describedby="credential-login-hint"
-                disabled
-              >自动登录</button>
-              <span class="login-help">
-                <button type="button" class="login-help-trigger" aria-label="自动登录说明" aria-describedby="credential-login-hint">?</button>
-                <span id="credential-login-hint" class="login-tooltip" role="tooltip">
-                  粘贴邮箱、密码和 2FA 密钥，自动填写登录。2FA 密钥会发送至 2fa.fun 获取验证码；连接测试通过后启用账号并配置 Codex。
-                </span>
-              </span>
-            </div>
-            <div class="login-method">
-              <button
-                id="import-proxy-accounts"
-                aria-describedby="json-login-hint"
-                disabled
-              >导入 JSON</button>
-              <span class="login-help">
-                <button type="button" class="login-help-trigger" aria-label="JSON 导入说明" aria-describedby="json-login-hint">?</button>
-                <span id="json-login-hint" class="login-tooltip" role="tooltip">
-                  选择 Sub2API 或 Codex 账号 JSON 文件。单账号会自动测试并连接，多账号需选择后启用；测试失败保留原连接。
-                </span>
-              </span>
-            </div>
-          </div>
-          <input
-            id="proxy-account-file"
-            type="file"
-            accept=".json,application/json"
-            aria-label="选择账号 JSON 文件"
-            hidden
-          />
-          <button id="cancel-proxy-login" hidden>取消登录</button>
-          <p id="proxy-feedback" class="feedback" role="status"></p>
-          <div id="account-switcher" class="account-switcher" hidden>
-            <div class="field">
-              <label for="proxy-account"
-                >已保存账号 <span id="account-count"></span></label
+          <div class="card-top-section">
+            <div class="session-title">
+              <h2 id="session-heading">Excel 连接</h2>
+              <span id="session-status" class="status" role="status"
+                >正在读取…</span
               >
-              <div class="account-select">
-                <select id="proxy-account">
-                  <button type="button">
-                    <selectedcontent></selectedcontent>
-                  </button>
-                </select>
-              </div>
             </div>
-            <button id="activate-account" disabled>使用此账号</button>
+            <p class="session-lead muted">
+              选择一种方式登录或导入 ChatGPT 账号。
+            </p>
+            <div class="login-methods">
+              <div class="login-method">
+                <button
+                  id="login-proxy"
+                  class="primary"
+                  aria-describedby="browser-login-hint"
+                  disabled
+                >手动登录</button>
+                <span class="login-help">
+                  <button type="button" class="login-help-trigger" aria-label="手动登录说明" aria-describedby="browser-login-hint">?</button>
+                  <span id="browser-login-hint" class="login-tooltip" role="tooltip">
+                    在打开的 OpenAI 页面输入设备码并确认授权。连接测试会消耗少量额度，通过后自动启用并配置 Codex。
+                  </span>
+                </span>
+              </div>
+              <div class="login-method">
+                <button
+                  id="auto-login-proxy"
+                  aria-describedby="credential-login-hint"
+                  disabled
+                >自动登录</button>
+                <span class="login-help">
+                  <button type="button" class="login-help-trigger" aria-label="自动登录说明" aria-describedby="credential-login-hint">?</button>
+                  <span id="credential-login-hint" class="login-tooltip" role="tooltip">
+                    粘贴邮箱、密码和 2FA 密钥，本机生成验证码并自动完成登录与 Codex 配置。
+                  </span>
+                </span>
+              </div>
+              <div class="login-method">
+                <button
+                  id="import-proxy-accounts"
+                  aria-describedby="json-login-hint"
+                  disabled
+                >导入 JSON</button>
+                <span class="login-help">
+                  <button type="button" class="login-help-trigger" aria-label="JSON 导入说明" aria-describedby="json-login-hint">?</button>
+                  <span id="json-login-hint" class="login-tooltip" role="tooltip">
+                    导入 Sub2API 或 Codex 账号 JSON。单账号自动测试并连接，多账号可选择后启用。
+                  </span>
+                </span>
+              </div>
+              <button id="cancel-proxy-login" hidden>取消登录</button>
+            </div>
+            <input
+              id="proxy-account-file"
+              type="file"
+              accept=".json,application/json"
+              aria-label="选择账号 JSON 文件"
+              hidden
+            />
+            <p id="proxy-feedback" class="feedback" role="status"></p>
           </div>
-          <details id="account-management" class="account-management" hidden>
-            <summary>管理账号</summary>
-            <p class="hint">移除仅清除本机保存的登录信息，不会注销账号。</p>
-            <button id="remove-proxy-account" disabled>移除所选账号</button>
-          </details>
         </section>
         <section
-          class="codex-connection codex-overview"
+          class="setup-panel connection-side codex-connection codex-overview"
           aria-labelledby="codex-heading"
         >
-          <div class="session-title">
-            <h2 id="codex-heading">Codex 接入</h2>
-            <p id="codex-status" class="status" role="status">正在检查配置…</p>
-          </div>
-          <p class="hint">
-            原配置会自动备份。首次接入或更换接入方式后，请重启 Codex。
-          </p>
-          <div class="endpoint">
-            <span>API 地址</span><code>http://127.0.0.1:8000/v1</code>
-          </div>
-        </section>
-      </div>
-      <details class="settings" id="advanced-settings">
-        <summary>高级设置</summary>
-        <div class="connection-layout advanced-connection">
-          <section aria-labelledby="legacy-heading">
-            <h2 id="legacy-heading">使用 Excel 登录</h2>
-            <p class="hint">读取 Excel 加载项的登录信息，替换当前登录信息。</p>
-            <div class="toolbar">
-              <button id="read-session">读取 Excel 登录</button
-              ><button id="clear-session" disabled>清除缓存</button>
+          <div class="card-top-section">
+            <div class="session-title">
+              <h2 id="codex-heading">Codex 接入</h2>
+              <p id="codex-status" class="status" role="status">正在检查配置…</p>
             </div>
-            <p id="session-feedback" class="feedback" role="status"></p>
-            <div class="codex-connection">
-              <h2>Codex 配置</h2>
+            <p class="session-lead hint">
+              原配置自动备份；更改接入后请重启 Codex。
+            </p>
+            <div class="codex-bar">
+              <div class="endpoint">
+                <span>API 地址</span><code>http://127.0.0.1:8000/v1</code>
+              </div>
               <div class="actions">
-                <button id="enable-codex" disabled>启用接入</button
+                <button id="enable-codex" class="primary" disabled>
+                  启用接入</button
                 ><button id="disable-codex" disabled>恢复原配置</button>
               </div>
             </div>
-          </section>
-          <section class="test-panel" aria-labelledby="test-heading">
-            <h2 id="test-heading">连接测试</h2>
+          </div>
+        </section>
+      </div>
+      <section
+        class="setup-panel account-hub"
+        aria-labelledby="account-hub-heading"
+      >
+        <div class="account-hub-current">
+          <div class="session-title">
+            <h2 id="account-hub-heading">登录账号</h2>
+            <span id="account-count" class="count-badge">0 个已保存</span>
+          </div>
+          <div class="active-account-card">
+            <span class="active-account-label">当前状态</span>
+            <p id="session-copy" class="session-copy">
+              选择一种方式登录 ChatGPT 账号。
+            </p>
+          </div>
+        </div>
+        <div id="account-switcher" class="account-switcher">
+          <div class="field">
+            <label for="proxy-account">已保存账号切换与管理</label>
+            <div class="account-switcher-row">
+              <div class="account-select">
+                <select id="proxy-account" disabled>
+                  <button type="button">
+                    <selectedcontent></selectedcontent>
+                  </button>
+                  <option value="">暂无已保存账号</option>
+                </select>
+              </div>
+              <button id="activate-account" class="primary" disabled>
+                使用此账号
+              </button>
+              <div id="account-management" class="account-management">
+                <button
+                  id="remove-proxy-account"
+                  class="quiet-danger"
+                  title="仅清除本机保存的登录信息，不会注销账号"
+                  disabled
+                >
+                  移除账号
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <section
+          class="test-panel card-sub-section"
+          aria-labelledby="test-heading"
+        >
+          <div class="sub-section-info">
+            <h3 id="test-heading">连接测试</h3>
+            <p class="hint">测试会消耗少量额度</p>
+          </div>
+          <div class="test-controls">
             <div class="field">
-              <label for="test-model">测试模型</label
-              ><select id="test-model" disabled>
+              <label for="test-model" class="sr-only">测试模型</label
+              ><select id="test-model" aria-label="测试模型" disabled>
+                <button type="button">
+                  <selectedcontent></selectedcontent>
+                </button>
                 <option>正在加载模型…</option>
               </select>
             </div>
             <button id="test-connection" disabled>测试连接</button>
-            <p class="hint">测试会消耗少量额度。</p>
-            <p id="test-feedback" class="feedback" role="status"></p>
-          </section>
-        </div>
-        <div class="setting-row">
-          <div>
-            <label for="revert-setting">关闭服务时恢复原配置</label>
-            <p>下次启动服务时重新接入。</p>
           </div>
-          <input id="revert-setting" type="checkbox" disabled />
+        </section>
+        <p id="test-feedback" class="feedback" role="status"></p>
+      </section>
+      <section
+        class="settings"
+        id="advanced-settings"
+        aria-labelledby="settings-heading"
+      >
+        <div class="settings-header">
+          <h2 id="settings-heading">高级设置</h2>
+          <p id="settings-feedback" class="feedback" role="status"></p>
         </div>
-        <div class="setting-row">
-          <div>
-            <label for="debug-setting">记录请求全文</label>
-            <p>用于排查问题，可能包含敏感信息。默认关闭。</p>
+        <div class="settings-grid">
+          <div class="setting-row">
+            <div>
+              <label for="revert-setting">关闭服务时恢复原配置</label>
+              <p>下次启动服务时重新接入。</p>
+            </div>
+            <input id="revert-setting" type="checkbox" disabled />
           </div>
-          <input id="debug-setting" type="checkbox" disabled />
-        </div>
-        <div class="setting-row">
-          <div>
-            <strong>开机启动</strong>
-            <p id="startup-status">正在检查…</p>
+          <div class="setting-row">
+            <div>
+              <label for="debug-setting">记录请求全文</label>
+              <p>用于排查问题，可能包含敏感信息。</p>
+            </div>
+            <input id="debug-setting" type="checkbox" disabled />
           </div>
-          <button id="toggle-startup" disabled>启用</button>
-        </div>
-        <div class="setting-row">
-          <div>
-            <strong>终端快捷命令</strong>
-            <p id="commands-status">正在检查…</p>
+          <div class="setting-row">
+            <div>
+              <strong>开机启动</strong>
+              <p id="startup-status">正在检查…</p>
+            </div>
+            <button id="toggle-startup" disabled>启用</button>
           </div>
-          <button id="toggle-commands" disabled>安装命令</button>
+          <div class="setting-row">
+            <div>
+              <strong>终端快捷命令</strong>
+              <p id="commands-status">正在检查…</p>
+            </div>
+            <button id="toggle-commands" disabled>安装命令</button>
+          </div>
         </div>
-      </details>
-      <p id="settings-feedback" class="feedback" role="status"></p>
+      </section>
       <footer>登录信息加密保存在本机。</footer>
     </main>
     <script src="/ui/api.js"></script>

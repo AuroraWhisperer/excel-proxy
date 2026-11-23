@@ -7,7 +7,7 @@
     <title>最近请求 · Excel 连接服务</title>
     <link rel="stylesheet" href="/ui/shared.css" />
   </head>
-  <body>
+  <body class="requests-page">
     <main>
       <nav class="page-nav" aria-label="页面导航">
         <a href="/ui">连接与设置</a
@@ -23,20 +23,20 @@
         hidden
       ></p>
       <section class="content-panel" aria-label="最近请求">
-        <div class="section-heading">
-          <div><p id="usage-period" class="muted">正在加载…</p></div>
+        <div class="section-heading requests-header">
+          <div class="request-search">
+            <input
+              id="request-filter"
+              type="search"
+              aria-label="筛选请求"
+              placeholder="筛选模型、状态或请求 ID"
+            />
+            <p id="usage-period" class="period-badge muted">正在加载…</p>
+          </div>
           <div class="toolbar">
             <span id="live-status" class="status" role="status">正在读取…</span
             ><button id="refresh">刷新</button>
           </div>
-        </div>
-        <div class="request-search">
-          <input
-            id="request-filter"
-            type="search"
-            aria-label="筛选请求"
-            placeholder="筛选模型、状态或请求 ID"
-          />
         </div>
         <div
           class="table-wrap"
@@ -85,13 +85,13 @@
         hidden
       >
         <div class="section-heading">
-          <div>
+          <div class="session-title">
             <h2 id="prompt-heading">请求详情</h2>
-            <p id="prompt-id" class="muted"></p>
+            <code id="prompt-id" class="prompt-id muted"></code>
           </div>
           <button id="close-prompt">收起详情</button>
         </div>
-        <p id="request-diagnosis" role="status" hidden></p>
+        <p id="request-diagnosis" class="diagnosis-banner" role="status" hidden></p>
         <pre id="prompt-content" tabindex="0"></pre>
       </section>
       <footer>

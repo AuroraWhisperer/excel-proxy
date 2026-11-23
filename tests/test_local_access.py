@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -34,8 +35,39 @@ class LocalAccessTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 403)
 
+    async def test_health_checks_only_selected_local_credentials(self):
+        store = proxy.proxy_accounts.proxy_account_store
+        with (
+            patch.object(store, "snapshot") as snapshot,
+            patch.object(proxy, "_selected_excel_headers") as renew,
+            patch.object(proxy, "_get_excel_upstream_client") as upstream,
+        ):
+            for expired, renewable, expected, status in (
+                (False, False, "available", 200),
+                (True, True, "renewable", 200),
+                (True, False, "expired", 503),
+            ):
+                snapshot.return_value = {"source": "oauth", "accounts": [{
+                    "active": True, "name": "private-email", "expired": expired, "renewable": renewable,
+                }]}
+                result = await self.request("/healthz")
+                self.assertEqual(result.status_code, status)
+                self.assertEqual(result.json()["credential"], expected)
+                self.assertEqual(result.json()["generation_queue"]["pending"], 0)
+                self.assertNotIn("private-email", result.text)
+                self.assertEqual(result.headers["cache-control"], "no-store")
+            snapshot.return_value = {"source": "none", "accounts": []}
+            self.assertEqual((await self.request("/healthz")).json()["credential"], "missing")
+            snapshot.side_effect = proxy.account_balances.BalanceError("private-file", 503)
+            result = await self.request("/healthz")
+            self.assertEqual(result.json()["credential"], "unreadable")
+            self.assertNotIn("private-file", result.text)
+            renew.assert_not_called()
+            upstream.assert_not_called()
+
     async def test_external_hosts_and_browser_origins_are_denied_on_all_pages(self):
         for path in (
+            "/healthz",
             "/v1/models",
             "/ui",
             "/ui/requests",

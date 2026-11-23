@@ -107,14 +107,8 @@ class ProxyClientConfigService:
         status = self.empty_proxy_status("codex")
         status["status_message"] = "managed config file not found"
         managed_config_exists = os.path.exists(self._config.codex_managed_config_file)
-        catalog_exists = os.path.exists(self._config.codex_model_catalog_file)
 
         if not managed_config_exists:
-            if catalog_exists:
-                status["exists"] = True
-                status["status_message"] = (
-                    "model catalog present, managed config file missing"
-                )
             return status
 
         status["exists"] = True
@@ -133,23 +127,12 @@ class ProxyClientConfigService:
             and provider_cfg.get("name") in {"Excel", "OpenAI"}
             and _is_codex_proxy_base_url(provider_cfg.get("base_url"))
             and provider_cfg.get("wire_api") == "responses"
-            and parsed.get("model_catalog_json")
-            == self._config.codex_model_catalog_file
-            and parsed.get("model_context_window")
-            == self._config.codex_model_context_window
-            and parsed.get("model_auto_compact_token_limit")
-            == self._config.codex_model_auto_compact_token_limit
         )
-        catalog_valid = self._codex_model_catalog_is_valid()
         proxy_markers_present = self._codex_managed_config_targets_proxy(parsed)
-        active = config_active and catalog_valid
+        active = config_active
         status["configured"] = bool(active)
         if active:
             status["status_message"] = "connection configured"
-        elif proxy_markers_present and not catalog_valid:
-            status["status_message"] = (
-                "managed config present, model catalog missing or invalid"
-            )
         elif proxy_markers_present:
             status["status_message"] = (
                 "managed config present, connection settings incomplete"
@@ -236,79 +219,77 @@ class ProxyClientConfigService:
         status = self.codex_proxy_status()
         if status.get("error"):
             return status
-        if status.get("configured"):
-            status["backup_path"] = self._latest_backup_path(
-                self._config.codex_managed_config_file
-            )
-            for path, render in (
-                (
-                    self._config.codex_primary_config_file,
-                    self._merged_codex_primary_config,
-                ),
-                (
-                    self._config.codex_managed_config_file,
-                    lambda _text: self._render_codex_proxy_config(),
-                ),
+        contents = {}
+        try:
+            for path in (
+                self._config.codex_primary_config_file,
+                self._config.codex_managed_config_file,
             ):
-                if not os.path.isfile(path):
-                    continue
-                with open(path, encoding="utf-8") as handle:
-                    current = handle.read()
-                updated = render(current)
-                if updated != current:
-                    if self._latest_backup_path(path) is None:
-                        self._backup_config_file(path)
-                    self._write_text_atomic(path, updated)
-            self.refresh_codex_model_catalog()
-            status["status_message"] = "connection already enabled"
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8") as handle:
+                        contents[path] = handle.read()
+                    self._parse_toml_values(contents[path])
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            status["error"] = f"failed to read Codex connection config: {exc}"
             return status
 
-        existing_primary_config = ""
-        primary_config_exists = os.path.exists(self._config.codex_primary_config_file)
-        if primary_config_exists:
-            try:
-                with open(
-                    self._config.codex_primary_config_file, encoding="utf-8"
-                ) as f:
-                    existing_primary_config = f.read()
-            except OSError as exc:
-                status["error"] = (
-                    f"failed to read {self._config.codex_primary_config_file}: {exc}"
+        primary = contents.get(self._config.codex_primary_config_file)
+        managed = contents.get(self._config.codex_managed_config_file)
+        repairing = managed is not None and self._codex_managed_config_targets_proxy(
+            self._parse_toml_values(managed)
+        )
+        selected = self._parse_toml_values(primary if primary is not None else managed or "").get("model")
+        updates = {}
+        if primary is not None:
+            updates[self._config.codex_primary_config_file] = self._merged_codex_primary_config(primary)
+        updates[self._config.codex_managed_config_file] = self._merged_codex_primary_config(
+            managed if managed is not None else self._config.codex_proxy_config,
+            selected_model=selected, managed=True,
+        )
+        backup_path = self._latest_backup_path(self._config.codex_primary_config_file) or self._latest_backup_path(
+            self._config.codex_managed_config_file
+        )
+        for path, updated in updates.items():
+            if updated == contents.get(path):
+                continue
+            original_backup = self._latest_backup_path(path)
+            if repairing:
+                saved = original_backup or self._backup_config_file(
+                    path, migration=self._codex_managed_config_targets_proxy(
+                        self._parse_toml_values(contents.get(path, ""))
+                    ),
                 )
-                return status
-
-        backup_path = self._backup_config_file(self._config.codex_managed_config_file)
-        primary_backup_path = self._backup_config_file(
-            self._config.codex_primary_config_file
-        )
-        os.makedirs(self._config.codex_config_dir, exist_ok=True)
-        self._write_json_atomic(
-            self._config.codex_model_catalog_file,
-            self._build_codex_model_catalog_payload(),
-        )
-        if primary_config_exists:
-            self._write_text_atomic(
-                self._config.codex_primary_config_file,
-                self._merged_codex_primary_config(existing_primary_config),
-            )
-        self._write_text_atomic(
-            self._config.codex_managed_config_file,
-            self._render_codex_proxy_config(),
-        )
-        status = self.codex_proxy_status()
-        status["backup_path"] = primary_backup_path or backup_path
-        status["status_message"] = "installed connection config"
-        return status
+            else:
+                saved = self._backup_config_file(path)
+            backup_path = saved or backup_path
+            self._write_text_atomic(path, updated)
+        result = self.codex_proxy_status()
+        result["backup_path"] = backup_path
+        result["status_message"] = "connection already enabled" if status.get("configured") else "installed connection config"
+        return result
 
     def refresh_codex_model_catalog(self) -> bool:
-        if not os.path.exists(self._config.codex_model_catalog_file):
-            return False
-        os.makedirs(self._config.codex_config_dir, exist_ok=True)
-        self._write_json_atomic(
-            self._config.codex_model_catalog_file,
-            self._build_codex_model_catalog_payload(),
-        )
-        return True
+        """Migrate old project overrides; Codex now supplies its own model metadata."""
+        changed = False
+        for path, managed in (
+            (self._config.codex_primary_config_file, False),
+            (self._config.codex_managed_config_file, True),
+        ):
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    current = handle.read()
+                updated = self._migrated_codex_model_config(current, managed=managed)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                print(f"Warning: could not migrate Codex connection config {path}: {exc}", flush=True)
+                continue
+            if updated != current:
+                if self._latest_backup_path(path) is None:
+                    self._backup_config_file(path, migration=True)
+                self._write_text_atomic(path, updated)
+                changed = True
+        return changed
 
     def refresh_client_model_metadata(self) -> dict[str, bool]:
         return {"codex": self.refresh_codex_model_catalog()}
@@ -318,7 +299,6 @@ class ProxyClientConfigService:
         if status.get("error"):
             return status
         managed_config_exists = os.path.exists(self._config.codex_managed_config_file)
-        catalog_exists = os.path.exists(self._config.codex_model_catalog_file)
         backup_path = self._latest_backup_path(self._config.codex_managed_config_file)
         primary_backup_path = self._latest_backup_path(
             self._config.codex_primary_config_file
@@ -333,7 +313,7 @@ class ProxyClientConfigService:
                 status["error"] = str(exc)
                 return status
 
-        if not managed_targets_proxy and not catalog_exists:
+        if not managed_targets_proxy:
             status["backup_path"] = backup_path
             status["restored_from_backup"] = False
             status["status_message"] = "connection already disabled"
@@ -365,7 +345,6 @@ class ProxyClientConfigService:
                     )
             elif managed_targets_proxy:
                 self._remove_file_if_exists(self._config.codex_managed_config_file)
-            self._remove_file_if_exists(self._config.codex_model_catalog_file)
         except Exception as exc:
             status["error"] = f"failed to disable connection config: {exc}"
             return status
@@ -549,17 +528,18 @@ class ProxyClientConfigService:
             normalized.append(target)
         return normalized
 
-    def _backup_config_file(self, path: str) -> str | None:
+    def _backup_config_file(self, path: str, *, migration=False) -> str | None:
         if not os.path.isfile(path):
             return None
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_path = f"{path}.ghcp-proxy.bak.{timestamp}"
+        marker = "ghcp-proxy.migration.bak" if migration else "ghcp-proxy.bak"
+        backup_path = f"{path}.{marker}.{timestamp}"
         attempt = 1
         while os.path.exists(backup_path):
             attempt += 1
-            backup_path = f"{path}.ghcp-proxy.bak.{timestamp}.{attempt}"
+            backup_path = f"{path}.{marker}.{timestamp}.{attempt}"
 
         shutil.copy2(path, backup_path)
         return backup_path
@@ -605,8 +585,44 @@ class ProxyClientConfigService:
         provider_cfg = self._codex_provider_config(parsed)
         return (
             _is_codex_proxy_base_url(provider_cfg.get("base_url"))
-            or parsed.get("model_catalog_json") == self._config.codex_model_catalog_file
+            or self._owns_codex_model_catalog(parsed.get("model_catalog_json"))
         )
+
+    def _owns_codex_model_catalog(self, value: object) -> bool:
+        return isinstance(value, str) and os.path.normcase(os.path.normpath(value)) == os.path.normcase(
+            os.path.normpath(self._config.codex_model_catalog_file)
+        )
+
+    def _migrated_codex_model_config(self, content: str, *, managed=False) -> str:
+        parsed = self._parse_toml_values(content)
+        if not self._codex_managed_config_targets_proxy(parsed):
+            return content
+        remove = set()
+        if self._owns_codex_model_catalog(parsed.get("model_catalog_json")):
+            remove.add("model_catalog_json")
+            if managed:
+                for key, value in (
+                    ("model_context_window", self._config.codex_model_context_window),
+                    ("model_auto_compact_token_limit", self._config.codex_model_auto_compact_token_limit),
+                ):
+                    if parsed.get(key) == value:
+                        remove.add(key)
+        model = parsed.get("model")
+        replace_model = excel_models.is_excel_model(model)
+        if not remove and not replace_model:
+            return content
+        lines = []
+        in_section = False
+        for statement in self._toml_statements(content):
+            if statement.strip().startswith("["):
+                in_section = True
+            key = None if in_section else self._toml_assignment_key(statement)
+            if key in remove:
+                continue
+            if key == "model" and replace_model:
+                statement = f"model = {_toml_basic_string(excel_models.upstream_model_for(model))}"
+            lines.append(statement)
+        return "\n".join(lines).rstrip() + "\n"
 
     def _codex_model_catalog_is_valid(self) -> bool:
         try:
@@ -621,40 +637,23 @@ class ProxyClientConfigService:
         )
 
     def _render_codex_proxy_config(self) -> str:
-        top_level_lines: list[str] = []
-        section_lines: list[str] = []
-        target = top_level_lines
-        for line in self._config.codex_proxy_config.strip().splitlines():
-            if line.strip().startswith("[") and line.strip().endswith("]"):
-                target = section_lines
-            target.append(line.rstrip())
-        top_level_lines.extend(
-            [
-                f"model_catalog_json = {_toml_basic_string(self._config.codex_model_catalog_file)}",
-                f"model_context_window = {self._config.codex_model_context_window}",
-                f"model_auto_compact_token_limit = {self._config.codex_model_auto_compact_token_limit}",
-            ]
+        return self._merged_codex_primary_config(
+            self._config.codex_proxy_config, managed=True,
         )
-        lines = [*top_level_lines, ""]
-        lines.extend(section_lines)
-        return "\n".join(line for line in lines if line is not None).rstrip() + "\n"
 
-    def _merged_codex_primary_config(self, existing_content: str) -> str:
+    def _merged_codex_primary_config(self, existing_content: str, *, selected_model=None, managed=False) -> str:
+        existing_content = self._migrated_codex_model_config(existing_content, managed=managed)
         parsed = self._parse_toml_values(existing_content)
-        selected_model = parsed.get("model")
-        if not excel_models.is_excel_model(selected_model):
-            selected_model = excel_models.MODEL_ID
+        if selected_model is None:
+            selected_model = parsed.get("model")
+        if excel_models.is_excel_model(selected_model):
+            selected_model = excel_models.upstream_model_for(selected_model)
+        elif selected_model not in excel_models.EXCEL_MODEL_UPSTREAMS.values():
+            selected_model = excel_models.UPSTREAM_MODEL
         top_level_keys = {
             "model": _toml_basic_string(selected_model),
             "model_provider": _toml_basic_string("custom"),
-            "approvals_reviewer": _toml_basic_string("user"),
-            "model_catalog_json": _toml_basic_string(
-                self._config.codex_model_catalog_file
-            ),
-        }
-        legacy_keys_to_remove = {
-            "model_context_window",
-            "model_auto_compact_token_limit",
+            "approvals_reviewer": _toml_basic_string(parsed.get("approvals_reviewer", "user")),
         }
         provider = self._codex_provider_config(parsed)
         existing_headers = (
@@ -674,11 +673,11 @@ class ProxyClientConfigService:
             )
             + " }",
         }
-        provider_section_name = "model_providers.custom"
-        lines = existing_content.splitlines()
+        provider_section_name = ("model_providers", "custom")
+        lines = self._toml_statements(existing_content)
         preamble: list[str] = []
-        sections: list[tuple[str, list[str]]] = []
-        current_section_name: str | None = None
+        sections: list[tuple[tuple[str, ...], list[str]]] = []
+        current_section_name: tuple[str, ...] | None = None
         current_lines: list[str] = []
 
         def flush_current():
@@ -690,9 +689,14 @@ class ProxyClientConfigService:
 
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
+            if stripped.startswith("["):
                 flush_current()
-                current_section_name = stripped[1:-1].strip()
+                section = tomllib.loads(line)
+                names = []
+                while isinstance(section, dict) and len(section) == 1:
+                    name, section = next(iter(section.items()))
+                    names.append(name)
+                current_section_name = tuple(names)
                 current_lines = [line]
                 continue
             if current_section_name is None:
@@ -704,11 +708,13 @@ class ProxyClientConfigService:
         filtered_preamble: list[str] = []
         for line in preamble:
             key = self._toml_assignment_key(line)
-            if key in top_level_keys or key in legacy_keys_to_remove:
+            if key in top_level_keys:
                 continue
             filtered_preamble.append(line)
 
-        if filtered_preamble and filtered_preamble[-1].strip():
+        while filtered_preamble and not filtered_preamble[-1].strip():
+            filtered_preamble.pop()
+        if filtered_preamble:
             filtered_preamble.append("")
         filtered_preamble.extend(
             [f"{key} = {value}" for key, value in top_level_keys.items()]
@@ -717,7 +723,7 @@ class ProxyClientConfigService:
         rendered_sections: list[str] = []
         provider_section_found = False
         for section_name, section_lines in sections:
-            if section_name == provider_section_name + ".http_headers":
+            if section_name == provider_section_name + ("http_headers",):
                 continue  # Preserve these values in the merged inline table.
             if section_name != provider_section_name:
                 rendered_sections.extend(section_lines)
@@ -742,7 +748,7 @@ class ProxyClientConfigService:
                 filtered_preamble.append("")
             rendered_sections.extend(
                 [
-                    f"[{provider_section_name}]",
+                    f"[{'.'.join(provider_section_name)}]",
                     *(f"{key} = {value}" for key, value in provider_keys.items()),
                 ]
             )
@@ -752,14 +758,28 @@ class ProxyClientConfigService:
             if output_lines and output_lines[-1].strip():
                 output_lines.append("")
             output_lines.extend(rendered_sections)
-        return "\n".join(output_lines).rstrip() + "\n"
+        rendered = "\n".join(output_lines).rstrip() + "\n"
+        return existing_content if self._parse_toml_values(rendered) == parsed else rendered
+
+    def _toml_statements(self, content: str):
+        """Keep multiline strings, arrays and inline tables intact while editing."""
+        pending = []
+        for line in content.splitlines():
+            pending.append(line)
+            statement = "\n".join(pending)
+            try:
+                tomllib.loads(statement)
+            except tomllib.TOMLDecodeError:
+                continue
+            yield statement
+            pending.clear()
 
     def _toml_assignment_key(self, line: str) -> str | None:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             return None
         key = stripped.split("=", 1)[0].strip()
-        return key if key and " " not in key else None
+        return key.strip("\"'") if key and " " not in key else None
 
     def _build_codex_model_catalog_payload(self) -> dict[str, object]:
         capabilities = self._model_capabilities()

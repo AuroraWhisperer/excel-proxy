@@ -16,6 +16,12 @@ TEST_MODULES = (
     "test_usage_storage",
     "test_stream_ownership",
     "test_stream_establishment",
+    "test_generation_admission",
+    "test_excel_task_identity",
+    "test_excel_websocket",
+    "test_bps_request_alignment",
+    "test_bps_history_alignment",
+    "test_bps_http_alignment",
     "test_local_access",
     "test_request_validation",
     "test_excel_only",
@@ -50,7 +56,6 @@ TEST_MODULES = (
     "test_usage_timing",
     "test_first_output_probe",
     "test_usage_startup",
-    "test_excel_session_capture",
     "test_proxy_env",
     "test_upstream_client",
     "test_windows_launcher",
@@ -73,13 +78,27 @@ def main() -> int:
             "GHCP_REQUEST_BODY_DUMP_DIR": str(Path(directory) / "request-bodies"),
             "GHCP_REQUEST_PROMPT_ARCHIVE_DIR": str(Path(directory) / "prompts"),
             "GHCP_TRACE_REQUESTS": "0",
+            "GHCP_GENERATION_CONCURRENCY": "20",
+            "GHCP_GENERATION_MAX_PENDING": "64",
+            "GHCP_GENERATION_WAIT_SECONDS": "30",
+            "GHCP_UPSTREAM_STARTS_PER_SECOND": "5",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPATH": str(repo / "app"),
         }
         with patch.dict(os.environ, isolated):
             import httpx
+            from excel_websocket import _ConnectToEndpoint
+
+            connect = _ConnectToEndpoint.open_tcp_connection
+
+            async def loopback_only(connection):
+                if connection.ws_uri.host != "127.0.0.1" or connection.ws_uri.secure:
+                    raise AssertionError("External WebSockets are disabled in offline regressions")
+                connection.proxy = None
+                return await connect(connection)
 
             with (
+                patch.object(_ConnectToEndpoint, "open_tcp_connection", loopback_only),
                 patch.object(
                     httpx.HTTPTransport,
                     "handle_request",

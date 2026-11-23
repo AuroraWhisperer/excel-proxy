@@ -78,12 +78,22 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
             "/api/proxy-accounts/login/start",
         ):
             self.assertIn(marker, html)
+        for removed in (
+            'id="read-session"',
+            'id="clear-session"',
+            'id="legacy-heading"',
+            'id="session-feedback"',
+            "使用 Excel 登录",
+            "读取 Excel 登录",
+        ):
+            self.assertNotIn(removed, html)
         self.assertLess(
-            html.index('id="advanced-settings"'), html.index('id="read-session"')
+            html.index('id="login-proxy"'), html.index('id="test-connection"')
         )
         self.assertLess(
-            html.index('id="advanced-settings"'), html.index('id="test-connection"')
+            html.index('id="login-proxy"'), html.index('id="advanced-settings"')
         )
+        self.assertNotIn("<details", html)
         self.assertNotIn("localStorage", html)
 
     async def test_connection_copy_keeps_actions_and_important_warnings(self):
@@ -91,9 +101,8 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         source = await self.page_source(response)
         html = source
         for marker in (
-            "<summary>高级设置</summary>",
+            '<h2 id="settings-heading">高级设置</h2>',
             "使用此账号",
-            "读取 Excel 登录",
             "测试会消耗少量额度",
             "可能包含敏感信息",
             "请重启 Codex",
@@ -209,6 +218,8 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
                 source = await self.page_source(response)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn('name="color-scheme" content="light"', source)
+                self.assertNotIn("<details", source)
+                self.assertNotIn("<summary", source)
                 self.assertEqual(source.count('aria-current="page"'), 1)
                 self.assertIn(f'href="{path}" aria-current="page"', source)
                 for target in ("/ui", "/ui/requests", "/ui/usage"):
@@ -310,8 +321,8 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('type="password"', source)
         self.assertIn("input.value = ''", source)
-        self.assertIn("2fa.fun", source)
-        self.assertIn("第三方网站 2fa.fun", source)
+        self.assertNotIn("2fa.fun", source)
+        self.assertIn("验证码在本机生成", source)
         self.assertIn("邮箱----密码----2FA密钥", source)
         self.assertIn("密码和密钥仅用于本次登录", source)
         self.assertNotIn("localStorage", source)
@@ -717,23 +728,20 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/ui/shared.css")
         source = await self.page_source(response)
         css = source
-        self.assertIn(".connection-page { font-size: 16px; }", css)
+        self.assertIn(".connection-page { font-size: 14px; }", css)
         controls = css.split(".connection-page button, .connection-page select {", 1)[
             1
         ].split("}", 1)[0]
-        for rule in ("min-height: 44px", "font-size: 15px"):
+        for rule in ("min-height: 36px", "font-size: 13.5px"):
             self.assertIn(rule, controls)
-        for selector in (
-            ".connection-page .hint, .connection-page .feedback, .connection-page .field label",
-            ".connection-workspace .field label",
-            ".connection-workspace .endpoint span",
-            ".connection-page .setting-row p",
-            ".connection-page footer",
-        ):
-            with self.subTest(selector=selector):
-                rule = css.split(selector + " {", 1)[1].split("}", 1)[0]
-                self.assertIn("font-size: 14px", rule)
-        self.assertIn("font: 14px/1.65", css.split("body {", 1)[1].split("}", 1)[0])
+        rule = css.split(
+            ".connection-page .hint, .connection-page .feedback, .connection-page .field label, "
+            ".connection-workspace .field label, .connection-workspace .endpoint span, "
+            ".connection-page .setting-row p, .connection-page footer {",
+            1,
+        )[1].split("}", 1)[0]
+        self.assertIn("font-size: 12.5px", rule)
+        self.assertIn("font: 14px/1.6", css.split("body {", 1)[1].split("}", 1)[0])
 
     async def test_pages_share_desktop_width_and_retain_narrow_layout(
         self,
@@ -745,7 +753,8 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("width: min(1600px, 100% - 48px)", main)
         narrow = css.split("@media (max-width: 720px) {", 1)[1]
         self.assertIn(
-            ".connection-workspace { grid-template-columns: minmax(0, 1fr); }", narrow
+            ".connection-workspace, .account-hub { grid-template-columns: minmax(0, 1fr); }",
+            narrow,
         )
 
     async def test_shared_stylesheet_is_served(self):
@@ -754,4 +763,4 @@ class DashboardPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/css", response.headers["content-type"])
         self.assertIn("color-scheme: light", source)
-        self.assertIn("--accent: #176b58", source)
+        self.assertIn("--accent: #d95d16", source)

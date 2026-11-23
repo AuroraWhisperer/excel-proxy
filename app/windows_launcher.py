@@ -262,9 +262,9 @@ def open_dashboard() -> None:
                 "Excel 连接服务",
                 DASHBOARD_URL,
                 width=1280,
-                height=720,
+                height=820,
                 min_size=(780, 600),
-                background_color="#f4f6f2",
+                background_color="#f8f3ec",
             )
             window.events.closed += closed.set
             activation_thread = Thread(

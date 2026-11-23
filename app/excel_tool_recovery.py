@@ -45,7 +45,8 @@ def tool_call_failure_message(diagnostics: dict) -> str:
         )
     return (
         f"{message} ({detail}). No client tool in this batch was executed. "
-        "Use explicit raw mode for declared raw_fields; otherwise regenerate the envelope with a JSON serializer. "
+        + _RAW_TRANSPORT_GUIDANCE
+        + "Regenerate serialized envelopes with a JSON serializer. "
         "Check embedded quotes, backslashes and the tool schema."
     )
 
@@ -161,8 +162,9 @@ def tool_call_repair_request(
         + _TRANSPORT_RETRY_GUIDANCE
         + " Return only a format-corrected version of this one rejected call. "
         "Preserve the exact tool target, command/code/custom-input text and all arguments; "
-        "never substitute a different command. For unframed raw source use the explicit "
-        "raw marker with the original text unchanged. "
+        "never substitute a different command. For CUSTOM tools, use the explicit "
+        "custom marker with the original input unchanged; for FUNCTION tools, put all arguments "
+        "in the JSON envelope. "
         "Do not repeat other calls in the batch or claim that any tool has executed."
     )
     metadata = dict(body.get("metadata", {}))

@@ -180,18 +180,14 @@ class ExcelOnlyTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_session_keeps_excel_error(self):
-        with (
-            patch.object(proxy.excel_session_capture, "refresh_macos_excel_session"),
-            patch.object(proxy.excel_session_capture, "refresh_windows_excel_session"),
-            patch.object(
-                excel_upstream.excel_session_store,
-                "request_headers",
-                side_effect=RuntimeError("Open the ChatGPT Excel add-in and sign in."),
-            ),
+        with patch.object(
+            proxy.proxy_accounts.proxy_account_store,
+            "snapshot",
+            return_value={"source": "none", "active_id": None, "accounts": []},
         ):
             response = await self.client.post("/v1/responses", json={"input": "hello"})
         self.assertEqual(response.status_code, 401)
-        self.assertIn("Excel", response.json()["error"]["message"])
+        self.assertIn("未启用连接账号", response.json()["error"]["message"])
 
 
 if __name__ == "__main__":

@@ -83,6 +83,49 @@ class StreamEstablishmentTests(unittest.IsolatedAsyncioTestCase):
         self.assert_finished(200)
         self.assertEqual(self.source.closed, 1)
 
+    async def test_disconnect_during_admission_never_starts_the_send(self):
+        pool = rate_limiting.GenerationAdmission(per_account=1)
+
+        async def receive():
+            while not pool.pending:
+                await asyncio.sleep(0)
+            return {"type": "http.disconnect"}
+
+        with (
+            patch.object(rate_limiting, "generation_admission", pool),
+            patch.object(self.client, "send", AsyncMock()) as send,
+        ):
+            async with pool.slot(""):
+                response = await asyncio.wait_for(
+                    self.relay(downstream_request=Request({"type": "http"}, receive)), 1
+                )
+        self.assertEqual(response.status_code, 499)
+        self.assert_finished(499)
+        self.assertEqual(pool.pending, 0)
+        send.assert_not_awaited()
+
+    async def test_disconnect_while_connect_fails_skips_the_retry(self):
+        connected = asyncio.Event()
+        gone = asyncio.Event()
+
+        async def fail(*args, **kwargs):
+            connected.set()
+            await gone.wait()
+            raise httpx.ConnectTimeout("not sent")
+
+        async def receive():
+            await connected.wait()
+            gone.set()
+            return {"type": "http.disconnect"}
+
+        with patch.object(self.client, "send", AsyncMock(side_effect=fail)) as send:
+            response = await asyncio.wait_for(
+                self.relay(downstream_request=Request({"type": "http"}, receive)), 1
+            )
+        self.assertEqual(response.status_code, 499)
+        send.assert_awaited_once()
+        self.assert_finished(499)
+
     async def test_supersession_blocks_before_client_creation(self):
         with patch.object(
             streams,

@@ -6,20 +6,19 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from uuid import uuid4
 
 import responses_replay_ids
 import tool_schema
 from excel_models import MODEL_ID
-from excel_tool_history import (
-    remember_native_call as _remember_native_call,
-    remember_native_calls as _remember_native_calls,
-)
+from excel_tool_history import remember_native_call as _remember_native_call
 from excel_tool_catalog import (
     CLIENT_MARKER_CALL_ID_PREFIX,
     NATIVE_FALLBACK_CALL_ID_PREFIX,
     TOOL_CALL_MARKER_OPEN,
     TOOL_CALL_MARKER_CLOSE,
+    _CUSTOM_TRANSPORT_PREFIX,
     _RAW_TRANSPORT_PREFIX,
     _client_tool_specs,
     _is_transport_name,
@@ -269,6 +268,28 @@ def _transport_envelope(
     if not isinstance(arguments, dict):
         return _transport_decode_failure(diagnostics, "arguments", arguments)
     summary = arguments.get("summary")
+    if isinstance(summary, str) and summary.startswith(_CUSTOM_TRANSPORT_PREFIX):
+        name = summary[len(_CUSTOM_TRANSPORT_PREFIX) :]
+        custom_input = arguments.get("code")
+        if (
+            not name
+            or any(
+                character.isspace()
+                or unicodedata.category(character) == "Cc"
+                or character in "/\\"
+                for character in name
+            )
+            or not isinstance(custom_input, str)
+            or len(custom_input.encode("utf-8")) > 1 << 20
+        ):
+            return _transport_decode_failure(diagnostics, "custom_transport", None)
+        if allowed_tools.get(name) != "custom":
+            if name not in allowed_tools:
+                if diagnostics is not None:
+                    diagnostics.update(_unknown_tool_diagnostics(name, allowed_tools, "custom"))
+                return _reject_native_tool_call(diagnostics, "unknown_tool")
+            return _reject_native_tool_call(diagnostics, "tool_type_mismatch")
+        return {"name": name, "input": custom_input}
     if isinstance(summary, str) and summary.startswith(_RAW_TRANSPORT_PREFIX):
         raw_specs = {
             key: info for key, info in (specs or {}).items() if key in allowed_tools
@@ -280,9 +301,34 @@ def _transport_envelope(
             return _transport_decode_failure(diagnostics, "raw_transport", None)
         return envelope
     envelope = _decode_transport_code(arguments.get("code"), allowed_tools, diagnostics)
-    for _ in range(2):
-        if envelope is None or not _is_transport_name(_tool_call_name(envelope)):
+    for depth in range(3):
+        if envelope is None:
             break
+        name = envelope.get("name")
+        name = name if isinstance(name, str) else ""
+        alias = envelope.get("tool")
+        alias = alias if isinstance(alias, str) else ""
+        if name and alias and name != alias:
+            return _transport_decode_failure(diagnostics, "envelope.name", None)
+        if not name and alias:
+            envelope = {**envelope, "name": alias}
+        name = _tool_call_name(envelope)
+        custom = not _is_transport_name(name) and allowed_tools.get(
+            _original_client_tool_name(name, allowed_tools)
+        ) == "custom"
+        field = "input" if custom else "arguments"
+        if "args" in envelope:
+            if field in envelope or (custom and "arguments" in envelope):
+                return _transport_decode_failure(diagnostics, "envelope." + field, None)
+            envelope = {**envelope, field: envelope["args"]}
+        if custom and "input" in envelope and "arguments" in envelope:
+            return _transport_decode_failure(diagnostics, "envelope.input", None)
+        if not _is_transport_name(name):
+            break
+        if depth == 2:
+            return _transport_decode_failure(
+                diagnostics, "nested.transport_limit", envelope
+            )
         nested_arguments = envelope.get("arguments")
         if isinstance(nested_arguments, str):
             try:
@@ -297,10 +343,6 @@ def _transport_envelope(
             )
         envelope = _decode_transport_code(
             nested_arguments.get("code"), allowed_tools, diagnostics
-        )
-    if envelope is not None and _is_transport_name(_tool_call_name(envelope)):
-        return _transport_decode_failure(
-            diagnostics, "nested.transport_limit", envelope
         )
     return envelope
 
@@ -459,8 +501,6 @@ def extract_native_client_tool_calls(
         for key in ("call_id", "id")
     ):
         return _reject_native_tool_call(diagnostics, "duplicate_tool_identity")
-    if not _remember_native_calls(native_calls):
-        return _reject_native_tool_call(diagnostics, "replay_cache_capacity")
     return converted
 
 
@@ -469,7 +509,7 @@ def extract_native_client_tool_call(
     source: dict,
     *,
     diagnostics: dict | None = None,
-    remember: bool = True,
+    remember: bool = False,
 ) -> dict[str, str] | None:
     if not isinstance(response, dict):
         return _reject_native_tool_call(diagnostics, "missing_completed_tool_call")
@@ -692,7 +732,7 @@ def response_payload_with_tool_calls(
     result.setdefault("object", "response")
     result.setdefault("created_at", int(time.time()))
     result["status"] = "completed"
-    result["model"] = model_id
+    result.setdefault("model", model_id)
     completed_calls = [{**call, "status": "completed"} for call in tool_calls]
     existing_output = result.get("output")
     output = (

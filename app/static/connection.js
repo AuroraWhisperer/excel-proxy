@@ -38,16 +38,11 @@ function renderSession(payload) {
   $('session-copy').textContent =
     payload.source === 'oauth'
       ? `当前账号：${payload.account_name}${payload.expired ? '。登录已过期，请重新登录。' : payload.renewable ? '' : '。有效期至 ' + date(payload.expires_at * 1000) + '，到期后请重新登录。'}`
-      : ready
-        ? '正在使用 Excel 加载项的登录信息。在此登录账号后，无需再打开 Excel。'
-        : '选择一种方式登录 ChatGPT 账号。';
-  $('clear-session').disabled =
-    payload.source === 'oauth' ||
-    !payload.configured ||
-    busy.has('clear-session');
+      : '选择一种方式登录 ChatGPT 账号。';
   if (payload.models) {
     const selected = $('test-model').value;
     $('test-model').replaceChildren(
+      ...$('test-model').querySelectorAll('button'),
       ...payload.models.map(model => new Option(model.display_name, model.id))
     );
     $('test-model').value = payload.models.some(model => model.id === selected)
@@ -73,7 +68,7 @@ function renderAccountControls() {
       : '正在导入…'
     : '导入 JSON';
   $('cancel-proxy-login').hidden = !state.signingIn;
-  $('proxy-account').disabled = locked;
+  $('proxy-account').disabled = locked || !rows.length;
   const selected = rows.find(row => row.id === $('proxy-account').value);
   $('activate-account').disabled =
     locked || !selected || (selected.active && !selected.pending);
@@ -81,20 +76,21 @@ function renderAccountControls() {
     ? '正在连接…'
     : '使用此账号';
   $('remove-proxy-account').disabled =
-    locked || busy.has('remove-proxy-account') || !$('proxy-account').value;
-  $('read-session').disabled = locked || busy.has('read-session');
+    locked || busy.has('remove-proxy-account') || !selected;
 }
 function renderAccounts(payload) {
   state.accounts = payload;
   const select = $('proxy-account');
   const selected = select.value;
-  const options = payload.accounts.map(
-    row =>
-      new Option(
-        `${row.name} · ${row.account_hint}${row.active ? '（当前使用）' : row.expired && !row.renewable ? '（需重新登录）' : ''}`,
-        row.id
+  const options = payload.accounts.length
+    ? payload.accounts.map(
+        row =>
+          new Option(
+            `${row.name} · ${row.account_hint}${row.active ? '（当前使用）' : row.expired && !row.renewable ? '（需重新登录）' : ''}`,
+            row.id
+          )
       )
-  );
+    : [new Option('暂无已保存账号', '')];
   // Preserve the open menu's keyboard focus during background refreshes.
   if (
     options.length !== select.options.length ||
@@ -108,9 +104,10 @@ function renderAccounts(payload) {
   if (payload.accounts.some(row => row.id === selected))
     select.value = selected;
   else if (payload.active_id) select.value = payload.active_id;
-  $('account-count').textContent = `· ${payload.accounts.length} 个`;
-  $('account-switcher').hidden = !payload.accounts.length;
-  $('account-management').hidden = !payload.accounts.length;
+  else if (!payload.accounts.length) select.value = '';
+  $('account-count').textContent = `${payload.accounts.length} 个已保存`;
+  $('account-switcher').hidden = false;
+  $('account-management').hidden = false;
   renderAccountControls();
 }
 async function activateAccount(id) {
@@ -191,6 +188,10 @@ function renderSettings(payload) {
     $('codex-status').textContent =
       client.error || (client.configured ? '已连接 Excel 连接服务' : '尚未启用');
     $('codex-status').classList.toggle('error', Boolean(client.error));
+    $('codex-status').classList.toggle(
+      'ok',
+      Boolean(client.configured && !client.error)
+    );
     $('enable-codex').disabled = busy.has('enable-codex');
     $('enable-codex').textContent = client.configured
       ? '更新模型列表'
@@ -419,23 +420,6 @@ $('remove-proxy-account').addEventListener('click', () =>
       })
     );
     return '账号已移除。';
-  })
-);
-$('read-session').addEventListener('click', () =>
-  action('read-session', 'session-feedback', async () => {
-    const payload = await post('/api/config/excel-session', {
-      action: 'read_cached'
-    });
-    renderSession(payload);
-    return payload.configured && !payload.expired
-      ? '已读取 Excel 登录信息。'
-      : '未找到有效登录，请先在 Excel 的官方加载项中登录。';
-  })
-);
-$('clear-session').addEventListener('click', () =>
-  action('clear-session', 'session-feedback', async () => {
-    await api('/api/config/excel-session', { method: 'DELETE' });
-    return '缓存已清除，不影响 Excel 中的登录。';
   })
 );
 $('test-model').addEventListener('change', () => feedback('test-feedback', ''));

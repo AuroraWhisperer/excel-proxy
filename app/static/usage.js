@@ -866,6 +866,8 @@ function testAccount(row) {
         const message =
           error.category === 'busy'
             ? '已有连接测试正在运行，请稍后再试。'
+            : error.category === 'local_capacity'
+              ? '本地队列繁忙，请等待正在生成的请求结束后再试。'
             : error.category === 'access'
               ? messages[403]
               : messages[error.status] || error.message;

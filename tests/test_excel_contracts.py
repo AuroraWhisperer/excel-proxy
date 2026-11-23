@@ -3,6 +3,7 @@ import copy
 import json
 import unittest
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -98,6 +99,20 @@ class ExcelContractTests(unittest.TestCase):
 
 
 class ExcelErrorTests(unittest.TestCase):
+    def test_retry_after_http_date_is_exposed_only_as_bounded_seconds(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 23, 12, 0, 0, tzinfo=timezone.utc)
+        with patch.object(upstream_errors, "datetime") as clock:
+            clock.now.return_value = now
+            for hint, seconds in (
+                ("Mon, 23 Nov 2026 12:00:09 GMT", "9"),
+                ("Mon, 23 Nov 2026 11:00:00 GMT", "0"),
+                ("Tue, 23 Nov 2027 12:00:00 GMT", "604800"),
+            ):
+                self.assertEqual(upstream_errors.retry_after_headers(httpx.Headers({"Retry-After": hint})),
+                                 {"retry-after": seconds})
+
     def plan(self):
         return proxy.UpstreamRequestPlan(
             request_id="contract-test",
@@ -136,6 +151,28 @@ class ExcelErrorTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_PROMPT", json.dumps(trace))
         self.assertEqual(trace["response"]["status_code"], 422)
         self.assertEqual(trace["response"]["upstream_request_id"], "upstream-contract")
+
+    def test_finished_trace_preserves_dispatched_identity_and_stream_response_model(self):
+        plan = self.plan()
+        identity = {"task_id": "a" * 64, "turn_id": "b" * 64, "agent_iteration": 2}
+        plan.body.update(model="gpt-6-astra", metadata={**identity, "private": "PRIVATE_PROMPT"})
+        plan.usage_event = {"response_model": "gpt-5.6-luna"}
+        for status in (200, 502):
+            with (
+                self.subTest(status=status),
+                patch.object(proxy, "request_tracing_enabled", return_value=True),
+                patch.object(proxy, "_debug_prompt_logging_enabled", return_value=False),
+                patch.object(proxy, "_plan_allows_full_debug_detail", return_value=False),
+                patch.object(proxy.usage_tracker, "finish_event") as finish,
+                patch.object(proxy, "_append_request_trace") as append,
+            ):
+                proxy._finish_usage_and_trace(plan, status)
+            trace = append.call_args.args[0]
+            self.assertEqual(trace["upstream_identity"], identity)
+            self.assertEqual(trace["upstream_model"], "gpt-6-astra")
+            self.assertEqual(trace["response_model"], "gpt-5.6-luna")
+            self.assertEqual(finish.call_args.args[0]["upstream_identity"], identity)
+            self.assertNotIn("PRIVATE_PROMPT", json.dumps(trace))
 
     def test_error_details_use_bounded_redacted_allowlist(self):
         payload = {
@@ -252,31 +289,72 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
         self.patches.enter_context(
             patch.object(rate_limiting, "throttle_upstream_request", new=AsyncMock())
         )
-        for name in ("refresh_macos_excel_session", "refresh_windows_excel_session"):
-            self.patches.enter_context(patch.object(proxy.excel_session_capture, name))
         self.patches.enter_context(
             patch.object(proxy, "_get_excel_upstream_client", return_value=self.remote)
         )
-        self.headers = self.patches.enter_context(
-            patch.object(
-                excel_upstream.excel_session_store,
-                "request_headers",
+        self.headers = Mock(
+            return_value={
+                "authorization": "Bearer KNOWN_CREDENTIAL",
+                "chatgpt-account-id": "test-account",
+            }
+        )
+        account_store = SimpleNamespace(
+            snapshot=Mock(
                 return_value={
-                    "authorization": "Bearer KNOWN_CREDENTIAL",
-                    "chatgpt-account-id": "test-account",
-                },
-            )
+                    "source": "oauth",
+                    "active_id": "test-account",
+                    "accounts": [],
+                }
+            ),
+            headers_for=self.headers,
+            refresh_after_unauthorized=Mock(return_value=None),
         )
         self.patches.enter_context(
-            patch.object(
-                excel_upstream.excel_session_store,
-                "tools_version_id",
-                return_value=None,
-            )
+            patch.object(proxy.proxy_accounts, "proxy_account_store", account_store)
         )
         self.finish = self.patches.enter_context(
             patch.object(proxy, "_finish_usage_and_trace")
         )
+
+    async def test_busy_account_rejects_all_generation_routes_before_model_send(self):
+        pool = rate_limiting.GenerationAdmission(per_account=1, max_pending=0)
+        with patch.object(rate_limiting, "generation_admission", pool):
+            async with pool.slot("test-account"):
+                for path, body in (
+                    ("/v1/responses", {"input": "test", "stream": True}),
+                    ("/responses", {"input": "test"}),
+                    ("/v1/responses/compact", {"input": "test"}),
+                    ("/v1/images/generations", {"prompt": "test"}),
+                ):
+                    with self.subTest(path=path):
+                        result = await self.local.post(path, json=body)
+                        self.assertEqual(result.status_code, 429, result.text)
+                        self.assertEqual(result.headers["retry-after"], "1")
+                        error = result.json()["error"]
+                        self.assertEqual(error["code"], "excel_queue_full")
+                        self.assertEqual(error["diagnosis"]["category"], "local_capacity")
+                probe = await self.local.post(
+                    "/api/config/excel-session/test", json={"model": excel_upstream.MODEL_ID}
+                )
+                self.assertEqual(probe.status_code, 429, probe.text)
+                self.assertEqual(probe.json()["category"], "local_capacity")
+        self.assertEqual(self.requests, [])
+
+    async def test_safe_retry_after_for_text_and_images(self):
+        for raw, expected in (("3", "3"), ("99999999", "604800"), ("PRIVATE_TOKEN", None)):
+            for path, body in (
+                ("/responses", {"input": "test", "stream": True}),
+                ("/responses", {"input": "test"}),
+                ("/images/generations", {"prompt": "test"}),
+            ):
+                with self.subTest(raw=raw, path=path, body=body):
+                    upstream = httpx.Response(429, json={}, headers={"retry-after": raw})
+                    with patch.object(self.remote, "send", AsyncMock(return_value=upstream)) as send:
+                        result = await self.local.post(path, json=body)
+                    self.assertEqual(result.status_code, 429)
+                    self.assertEqual(result.headers.get("retry-after"), expected)
+                    self.assertEqual(result.json()["error"]["code"], "excel_rate_limited")
+                    send.assert_awaited_once()
 
     async def test_http_errors_are_safe_on_both_response_modes(self):
         for stream in (False, True):
@@ -296,6 +374,40 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
                     result.headers.get("x-request-id"), "upstream-contract"
                 )
         self.assertEqual(len(self.requests), 2)
+
+    async def test_debug_dump_contains_final_dispatched_body(self):
+        for stream in (False, True):
+            with (
+                self.subTest(stream=stream),
+                patch.object(proxy, "_debug_prompt_logging_enabled", return_value=True),
+                patch.object(proxy, "request_body_dump_enabled", return_value=True),
+                patch.object(proxy, "_append_request_trace"),
+                patch.object(proxy.request_trace_storage, "submit_body_dump") as dump,
+            ):
+                result = await self.local.post(
+                    "/responses", json={"model": "gpt-6-astra", "input": "test", "stream": stream}
+                )
+            self.assertEqual(result.status_code, 422)
+            dump.assert_called_once()
+            snapshot = dump.call_args.args[2]
+            sent = json.loads(self.requests[-1].content)
+            self.assertEqual(snapshot["upstream_body"], sent)
+            self.assertEqual(json.loads(snapshot["upstream_body_wire"]), sent)
+            self.assertEqual(len(sent["metadata"]["turn_id"]), 64)
+
+    async def test_queued_rejection_has_no_outbound_dump(self):
+        pool = rate_limiting.GenerationAdmission(per_account=1, max_pending=0)
+        with (
+            patch.object(rate_limiting, "generation_admission", pool),
+            patch.object(proxy, "_debug_prompt_logging_enabled", return_value=True),
+            patch.object(proxy, "_append_request_trace"),
+            patch.object(proxy, "_dump_outbound_request_body") as dump,
+        ):
+            async with pool.slot("test-account"):
+                result = await self.local.post("/responses", json={"input": "test"})
+        self.assertEqual(result.status_code, 429)
+        self.assertEqual(self.requests, [])
+        dump.assert_not_called()
 
     async def test_invalid_contract_is_rejected_before_upstream(self):
         for param, value in (
@@ -832,9 +944,15 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_connection_test_timeout_closes_upstream_and_finishes_usage(self):
         closed = Mock()
+        reading = Mock()
+        deadline = asyncio.timeout(None)
 
         class HangingStream(httpx.AsyncByteStream):
             async def __aiter__(self):
+                reading()
+                # Expire only after the response is owned. A short wall-clock
+                # deadline can fire during account lookup before send starts.
+                deadline.reschedule(asyncio.get_running_loop().time())
                 await asyncio.Event().wait()
                 yield b""
 
@@ -845,17 +963,26 @@ class ExcelHTTPContractTests(unittest.IsolatedAsyncioTestCase):
             200, headers={"content-type": "text/event-stream"}, stream=HangingStream()
         )
         with (
-            patch.object(self.remote, "send", AsyncMock(return_value=response)),
-            patch.object(proxy, "_EXCEL_CONNECTION_TEST_TIMEOUT_SECONDS", 0.05),
+            patch.object(self.remote, "send", AsyncMock(return_value=response)) as send,
+            patch.object(proxy.asyncio, "timeout", return_value=deadline) as timeout,
         ):
-            result = await self.local.post(
-                "/api/config/excel-session/test",
-                json={"model": excel_upstream.MODEL_ID},
+            result = await asyncio.wait_for(
+                self.local.post(
+                    "/api/config/excel-session/test",
+                    json={"model": excel_upstream.MODEL_ID},
+                ),
+                timeout=2,
             )
         self.assertEqual(result.status_code, 504)
         self.assertEqual(result.json()["category"], "timeout")
+        timeout.assert_called_once_with(proxy._EXCEL_CONNECTION_TEST_TIMEOUT_SECONDS)
+        self.assertTrue(deadline.expired())
+        send.assert_awaited_once()
+        reading.assert_called_once()
         closed.assert_called_once()
+        self.finish.assert_called_once()
         self.assertEqual(self.finish.call_args.args[1], 499)
+        self.assertIs(self.finish.call_args.kwargs["upstream"], response)
         self.assertFalse(proxy._excel_connection_test_lock.locked())
 
     async def test_connection_test_rejects_unknown_models_and_cross_site_requests(self):

@@ -58,9 +58,13 @@ def openai_error_response(
 def upstream_request_error_status_and_message(
     exc: httpx.RequestError,
 ) -> tuple[int, str]:
+    if isinstance(exc, upstream_errors.ExcelResponseError):
+        return exc.status_code, str(exc)
     if isinstance(exc, httpx.TimeoutException):
         return 504, "Upstream request timed out"
     if isinstance(exc, httpx.ConnectError):
+        if upstream_errors.certificate_verification_failed(exc):
+            return 502, "Upstream TLS certificate verification failed. Check the trusted CA bundle."
         return 502, "Upstream connection failed"
     return 502, "Upstream request failed"
 

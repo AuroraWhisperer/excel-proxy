@@ -2,7 +2,9 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -12,6 +14,19 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from usage_tracking import SSEUsageCapture
+
+
+PROBE_DEADLINE_SECONDS = 120
+TRACE_EVENTS = {
+    f"{phase}.{outcome}"
+    for phase in (
+        "connection.connect_tcp",
+        "connection.start_tls",
+        "http11.send_request_body",
+        "http11.receive_response_headers",
+    )
+    for outcome in ("started", "complete", "failed")
+}
 
 
 async def probe(client, url, body, headers=None):
@@ -24,19 +39,11 @@ async def probe(client, url, body, headers=None):
 
     async def trace(name, info):
         # Trace info can contain authorization headers; retain event names only.
-        if any(
-            phase in name
-            for phase in (
-                "connect_tcp",
-                "start_tls",
-                "send_request_body",
-                "receive_response_headers",
-            )
-        ):
+        if name in TRACE_EVENTS:
             result["transport_events"].append({"event": name, "ms": elapsed()})
 
     try:
-        async with client.stream(
+        async with asyncio.timeout(PROBE_DEADLINE_SECONDS), client.stream(
             "POST",
             url,
             json=body,
@@ -50,35 +57,39 @@ async def probe(client, url, body, headers=None):
                         result.setdefault("first_byte_ms", elapsed())
                     if capture.feed(chunk):
                         result.setdefault("first_output_ms", elapsed())
-            else:
-                await response.aread()
+                    if capture.terminal_event_seen:
+                        break
         result.update(usage=capture.usage, terminal=capture.terminal_event_type)
+    except TimeoutError:
+        result["error"] = "probe_deadline"
     except httpx.RequestError as error:
         result["error"] = type(error).__name__
     result["duration_ms"] = elapsed()
     return result
 
 
-async def run(args):
+async def run(args, output):
     session = "latency-probe-" + uuid.uuid4().hex
     headers = None
     url = "http://127.0.0.1:8000/v1/responses"
     if args.direct:
         import excel_upstream
+        from excel_websocket import websocket_mounts
+        import proxy_accounts
+        from upstream_client import _build_upstream_client
 
-        # Load existing credentials without persisting, recapturing, or logging them.
-        store = excel_upstream.ExcelSessionStore(excel_upstream.SESSION_FILE)
-        store.load()
-        headers = store.request_headers(stream=True)
+        # Load the active saved connection account without logging credentials.
+        selection = proxy_accounts.proxy_account_store.snapshot()
+        if selection["source"] != "oauth" or not selection["active_id"]:
+            raise RuntimeError("No active connection account is configured.")
+        headers = proxy_accounts.proxy_account_store.headers_for(
+            selection["active_id"], stream=True, active=True
+        )
         url = excel_upstream.RESPONSES_URL
-    async with httpx.AsyncClient(
-        trust_env=args.direct,
-        http2=False,
-        timeout=90,
-        limits=httpx.Limits(
-            max_connections=8, max_keepalive_connections=4, keepalive_expiry=300
-        ),
-    ) as client:
+        client = _build_upstream_client(http2_override=False, mounts_for=websocket_mounts)
+    else:
+        client = httpx.AsyncClient(trust_env=False, timeout=90)
+    async with client:
         if not args.direct:
             response = await client.get("http://127.0.0.1:8000/v1/models")
             response.raise_for_status()
@@ -103,9 +114,7 @@ async def run(args):
                 "prompt_cache_key": session,
             }
             if args.direct:
-                body = excel_upstream.prepare_responses_body(
-                    body, tools_version_id=store.tools_version_id()
-                )
+                body = excel_upstream.prepare_responses_body(body)
             result = await probe(client, url, body, headers)
             print(
                 json.dumps(
@@ -117,6 +126,7 @@ async def run(args):
                         **result,
                     }
                 ),
+                file=output,
                 flush=True,
             )
             if (
@@ -140,6 +150,11 @@ def main():
         help="Measure the configured upstream using the saved session, not the local proxy.",
     )
     parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write JSON Lines to a new report file instead of stdout.",
+    )
+    parser.add_argument(
         "--efforts",
         nargs="+",
         choices=("medium", "xhigh"),
@@ -150,7 +165,17 @@ def main():
         parser.error("Live probes consume quota; explicitly pass --live to run them.")
     if len(args.efforts) > 8:
         parser.error("Limit each run to at most eight short diagnostic requests.")
-    return asyncio.run(run(args))
+    destination = nullcontext(sys.stdout)
+    if args.output is not None:
+        try:
+            destination = open(
+                args.output, "x", encoding="utf-8",
+                opener=lambda path, flags: os.open(path, flags, 0o600),
+            )
+        except OSError:
+            parser.error("Cannot create report. Choose a new file in a writable directory.")
+    with destination as output:
+        return asyncio.run(run(args, output))
 
 
 if __name__ == "__main__":

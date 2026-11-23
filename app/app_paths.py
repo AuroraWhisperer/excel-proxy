@@ -2,10 +2,33 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 
 APP_DIR_NAME = "ghcp_proxy"
+
+
+def lock_service_state(directory: str):
+    """Keep the returned file open for the lifetime of the standalone service."""
+    os.makedirs(directory, exist_ok=True)
+    handle = open(os.path.join(directory, "service.lock"), "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            raise RuntimeError("Another Excel proxy service owns this state directory.") from exc
+        raise
+    return handle
 
 
 def _env_path(name: str) -> str | None:

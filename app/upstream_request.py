@@ -1,6 +1,7 @@
 """Request context shared by request orchestration and stream lifecycle."""
 
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass
@@ -16,3 +17,4 @@ class UpstreamRequestPlan:
     replay_subagent: str | None = None
     trace_context: dict | None = None
     request_affinity: str | None = None
+    on_send_state: Callable[[bool], None] | None = None

@@ -1,6 +1,9 @@
 import importlib.util
+import asyncio
 import json
+import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -59,6 +62,7 @@ class FirstOutputProbeTests(unittest.IsolatedAsyncioTestCase):
                 "http11.send_request_body.complete",
                 {"authorization": "test-secret"},
             )
+            await request.extensions["trace"]("private.start_tls.test-secret", {})
             return httpx.Response(422, text="test-secret")
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -71,6 +75,51 @@ class FirstOutputProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result["transport_events"][0]["event"], "http11.send_request_body.complete"
         )
+
+    async def test_terminal_event_finishes_without_waiting_for_eof(self):
+        class OpenAfterTerminal(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield frame("response.completed", response={"status": "completed"})
+                raise AssertionError("read past the terminal event")
+
+        transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=OpenAfterTerminal()))
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await probe_module.probe(client, "https://example.test", {})
+        self.assertEqual(result["terminal"], "response.completed")
+
+    async def test_probe_deadline_bounds_heartbeat_only_stream(self):
+        class NoTerminal(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b": heartbeat\n\n"
+                await asyncio.Event().wait()
+
+        transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=NoTerminal()))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with patch.object(probe_module, "PROBE_DEADLINE_SECONDS", 0.02):
+                result = await probe_module.probe(client, "https://example.test", {})
+        self.assertEqual(result["error"], "probe_deadline")
+
+    def test_report_created_privately_and_never_overwritten(self):
+        def write_report(args, output):
+            output.write('{"terminal":"response.completed"}\n')
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.jsonl"
+            with (
+                patch("sys.argv", ["probe", "--live", "--output", str(report)]),
+                patch.object(probe_module, "run", side_effect=write_report) as run,
+                patch("sys.stderr"),
+            ):
+                self.assertEqual(probe_module.main(), 0)
+                saved = report.read_bytes()
+                self.assertEqual(json.loads(saved)["terminal"], "response.completed")
+                if os.name != "nt":
+                    self.assertEqual(report.stat().st_mode & 0o077, 0)
+                with self.assertRaises(SystemExit):
+                    probe_module.main()
+                self.assertEqual(report.read_bytes(), saved)
+                run.assert_awaited_once()
 
     def test_live_requests_require_explicit_opt_in(self):
         with (

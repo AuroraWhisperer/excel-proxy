@@ -195,7 +195,7 @@ class ExcelStreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 await stream.aclose()
             await asyncio.wait_for(closed.wait(), 0.2)
 
-    def test_parallel_results_count_as_one_agent_iteration(self):
+    def test_each_parallel_result_advances_agent_iteration(self):
         body = {
             "input": [
                 {"role": "user", "content": "test"},
@@ -215,10 +215,10 @@ class ExcelStreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(
             excel_upstream.prepare_responses_body(body)["metadata"]["agent_iteration"],
-            "2",
+            "3",
         )
 
-    def test_plural_conversion_replays_each_original_identity(self):
+    def test_plural_conversion_rebuilds_each_identity_and_client_input(self):
         originals = [native_call(10), native_call(11)]
         converted = excel_upstream.extract_native_client_tool_calls(
             {"output": originals}, self.source_body
@@ -242,8 +242,19 @@ class ExcelStreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
         replay = excel_upstream.prepare_responses_body(body)
         calls = [c for c in replay["input"] if c.get("type") == "function_call"]
         self.assertEqual(
-            [c["arguments"] for c in calls], [c["arguments"] for c in originals]
+            [(c["id"], c["call_id"]) for c in calls],
+            [(c["id"], c["call_id"]) for c in originals],
         )
+        self.assertEqual(
+            [json.loads(json.loads(c["arguments"])["code"]) for c in calls],
+            [json.loads(json.loads(c["arguments"])["code"]) for c in originals],
+        )
+        for call in calls:
+            self.assertEqual(call["name"], "run_officejs")
+            self.assertEqual(
+                json.loads(call["arguments"])["summary"],
+                "Replay a previously requested client tool",
+            )
 
     async def test_incomplete_and_duplicate_calls_are_not_executable(self):
         first, second = native_call(20), native_call(21)

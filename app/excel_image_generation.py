@@ -3,11 +3,11 @@
 import base64
 import binascii
 
-import excel_upstream
+from excel_session import HTTP_API_BASE_URL
 
 
-GENERATIONS_URL = excel_upstream.RESPONSES_URL.rsplit("/", 1)[0] + "/images/generations"
-EDITS_URL = excel_upstream.RESPONSES_URL.rsplit("/", 1)[0] + "/images/edits"
+GENERATIONS_URL = HTTP_API_BASE_URL + "/images/generations"
+EDITS_URL = HTTP_API_BASE_URL + "/images/edits"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 _CHOICES = {

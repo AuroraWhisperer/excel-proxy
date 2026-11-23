@@ -135,15 +135,13 @@ class ReplayLimitsTests(unittest.TestCase):
                 self.subTest(limit=limit),
                 patch.object(excel_tool_history, limit, budget),
             ):
-                diagnostic = {}
-                self.assertIsNone(
+                self.assertFalse(excel_upstream._remember_native_calls([first, second]))
+                self.assertEqual(len(
                     excel_upstream.extract_native_client_tool_calls(
                         {"output": [first, second]},
                         {"tools": [FUNCTION_TOOL]},
-                        diagnostics=diagnostic,
                     )
-                )
-                self.assertEqual(diagnostic["reason"], "replay_cache_capacity")
+                ), 2)
                 self.assertFalse(Path(self.database).exists())
                 self.assertFalse(excel_tool_history._native_call_cache)
 

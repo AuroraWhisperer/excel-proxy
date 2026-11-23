@@ -1,7 +1,3 @@
-# ⚠️ 此方法 10.1 已失效 / No longer working (2026-10-01)
-
-The Excel/BPS access method described below no longer works. The source and setup instructions are retained for local installation, startup, and reference; a running dashboard does not mean upstream model requests will succeed.
-
 <div align="center">
 
 <h1>Excel Connection Service</h1>
@@ -29,7 +25,7 @@ The Excel/BPS access method described below no longer works. The source and setu
 The service translates Codex requests for the Excel/BPS backend and streams replies and tool calls back. Codex handles file access, code edits, and shell commands.
 
 ```text
-Codex → Excel Connection Service on your machine → OpenAI Excel/BPS backend
+Codex → HTTP /v1/responses → local Excel Connection Service → WebSocket → OpenAI Excel/BPS
 ```
 
 ## Features
@@ -77,9 +73,7 @@ Alternatively, [download the ZIP](https://github.com/AuroraWhisperer/excel-proxy
 
 Double-click **启动.vbs** to open the app:
 
-The following connection steps describe the original workflow. The October 1 failure notice above still applies.
-
-1. Click **手动登录** (Manual sign-in) and finish sign-in in the official authorization window.
+1. Click **手动登录** (Manual sign-in). Enter the device code shown in the dashboard on the OpenAI approval page and authorize Excel.
 2. The app validates the account with a short model request, using a small amount of quota. On success, it enables the account and backs up and updates your Codex configuration.
 3. Restart Codex and start a new conversation.
 
@@ -131,6 +125,7 @@ Thanks to the authors and contributors of these projects:
 | --- | --- |
 | [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api) | Excel/Basispoints protocol handling, tool history and batch validation, tool transport recovery, and image limits. |
 | [Kaixxrua/excel-codex-bridge](https://github.com/Kaixxrua/excel-codex-bridge) | Local Codex-to-Excel bridging, local access protection, client tool conversion, attachment uploads, and error handling. |
+| [sunboyzoey/bps-local-public](https://github.com/sunboyzoey/bps-local-public) | BPS WebSocket generation, device authorization, bounded generation queues, and request pacing. |
 
 See the [reference notes](docs/参考项目与改进.md) for source versions and adaptation details.
 

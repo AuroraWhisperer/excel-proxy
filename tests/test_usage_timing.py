@@ -127,6 +127,13 @@ class FirstOutputCaptureTests(unittest.TestCase):
 
 
 class FirstOutputLifecycleTests(unittest.TestCase):
+    def test_unknown_retry_hint_is_not_persisted(self):
+        tracker = UsageTracker()
+        upstream = httpx.Response(429, headers={"retry-after": "PRIVATE-HEADER"})
+        with patch.object(tracker, "_persist_event") as persist:
+            tracker.finish_event({"request_id": "retry-hint"}, 429, upstream=upstream)
+        self.assertNotIn("PRIVATE-HEADER", str(persist.call_args.args[0]))
+
     def test_first_output_is_recorded_once_and_persisted(self):
         tracker = UsageTracker()
         event = {"request_id": "timing-test", "_started_monotonic": 100.0}
@@ -156,27 +163,28 @@ class BufferedFirstOutputTests(unittest.IsolatedAsyncioTestCase):
         released = threading.Event()
         results = []
 
-        def refresh(*args, **kwargs):
+        def load_headers(*args, **kwargs):
             loop.call_soon_threadsafe(released.set)
             results.append(released.wait(timeout=1))
+            raise RuntimeError("test stop before upstream")
 
         with (
-            patch("proxy.excel_session_capture.refresh_macos_excel_session"),
-            patch(
-                "proxy.excel_session_capture.refresh_windows_excel_session",
-                side_effect=refresh,
+            patch.object(
+                proxy.proxy_accounts.proxy_account_store,
+                "snapshot",
+                return_value={"source": "oauth", "active_id": "account-a", "accounts": []},
             ),
             patch.object(
-                proxy.excel_upstream.excel_session_store,
-                "request_headers",
-                side_effect=RuntimeError("test stop before upstream"),
+                proxy.proxy_accounts.proxy_account_store,
+                "headers_for",
+                side_effect=load_headers,
             ),
         ):
             response = await proxy._handle_excel_responses(
                 None, {"model": "gpt-6-astra-excel", "stream": True}
             )
         self.assertEqual(response.status_code, 401)
-        self.assertEqual(results, [True], "Session discovery blocked the event loop")
+        self.assertEqual(results, [True], "Credential refresh blocked the event loop")
 
     async def test_buffering_preserves_first_output_time_before_completion(self):
         clock = [100.0]

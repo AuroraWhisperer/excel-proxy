@@ -1,4 +1,7 @@
 import unittest
+from contextlib import redirect_stdout
+import io
+import os
 import json
 import tempfile
 import tomllib
@@ -6,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import excel_upstream
+import excel_models
 from constants import CODEX_PROXY_CONFIG
 from codex_config import ProxyClientConfig, ProxyClientConfigService
 
@@ -66,55 +70,64 @@ class ExcelConfigLifecycleTests(unittest.TestCase):
         result = self.service.write_codex_proxy_config()
         self.assertTrue(result["configured"])
         parsed = tomllib.loads(self.primary.read_text(encoding="utf-8"))
-        self.assertEqual(parsed["model"], excel_upstream.MODEL_ID)
+        self.assertEqual(parsed["model"], excel_models.UPSTREAM_MODEL)
         self.assertTrue(parsed["features"]["example"])
-        catalog = json.loads(self.catalog.read_text(encoding="utf-8"))
-        self.assertEqual(
-            {model["slug"] for model in catalog["models"]},
-            set(excel_upstream.MODEL_IDS),
-        )
+        self.assertFalse(self.catalog.exists())
+        for content in (parsed, tomllib.loads(self.managed.read_text(encoding="utf-8"))):
+            for key in ("model_catalog_json", "model_context_window", "model_auto_compact_token_limit"):
+                self.assertNotIn(key, content)
         backups = set(self.root.glob("*.bak.*"))
+        primary = self.primary.read_bytes()
+        managed = self.managed.read_bytes()
         self.service.write_codex_proxy_config()
         self.assertEqual(set(self.root.glob("*.bak.*")), backups)
+        self.assertEqual(self.primary.read_bytes(), primary)
+        self.assertEqual(self.managed.read_bytes(), managed)
         self.service.disable_codex_proxy_config()
         self.assertEqual(self.primary.read_text(encoding="utf-8"), original)
         self.assertFalse(self.catalog.exists())
 
-    def test_refresh_updates_stale_compaction_limits_without_changing_config(self):
-        self.primary.write_text('model = "old-model"\n', encoding="utf-8")
-        self.service.write_codex_proxy_config()
-        primary = self.primary.read_text(encoding="utf-8")
-        managed = self.managed.read_text(encoding="utf-8")
-        catalog = json.loads(self.catalog.read_text(encoding="utf-8"))
-        for model in catalog["models"]:
-            model["auto_compact_token_limit"] = 180_000
-        self.catalog.write_text(json.dumps(catalog), encoding="utf-8")
-
-        self.assertTrue(self.service.refresh_codex_model_catalog())
-
-        refreshed = json.loads(self.catalog.read_text(encoding="utf-8"))
-        for model in refreshed["models"]:
-            expected = {
-                "gpt-6-astra-excel": 232_200,
-                "gpt-5.6-luna-excel": 180_000,
-            }.get(model["slug"], 240_000)
-            with self.subTest(model=model["slug"]):
-                self.assertEqual(model["auto_compact_token_limit"], expected)
-        self.assertEqual(self.primary.read_text(encoding="utf-8"), primary)
-        self.assertEqual(self.managed.read_text(encoding="utf-8"), managed)
+    def test_startup_refresh_migrates_owned_references_without_rewriting_catalog(self):
+        legacy = (
+            f"model_catalog_json = {json.dumps(str(self.catalog))}\n"
+            "model_context_window = 272000\n"
+            "model_auto_compact_token_limit = 240000\n"
+            + CODEX_PROXY_CONFIG.replace("gpt-5.6-sol-excel", "gpt-6-astra-excel")
+        )
+        self.primary.write_text(legacy, encoding="utf-8")
+        self.managed.write_text(legacy, encoding="utf-8")
+        self.catalog.write_text("legacy catalog remains untouched", encoding="utf-8")
+        self.assertEqual(self.service.refresh_client_model_metadata(), {"codex": True})
+        for path in (self.primary, self.managed):
+            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(parsed["model"], "gpt-6-astra")
+            self.assertNotIn("model_catalog_json", parsed)
+            backups = list(self.root.glob(f"{path.name}.ghcp-proxy.migration.bak.*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), legacy)
+            self.assertIsNone(self.service._latest_backup_path(str(path)))
+        primary = tomllib.loads(self.primary.read_text(encoding="utf-8"))
+        self.assertEqual(primary["model_context_window"], 272000)
+        managed = tomllib.loads(self.managed.read_text(encoding="utf-8"))
+        self.assertNotIn("model_context_window", managed)
+        self.assertNotIn("model_auto_compact_token_limit", managed)
+        self.assertTrue(self.service.codex_proxy_status()["configured"])
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+        self.assertEqual(self.service.refresh_client_model_metadata(), {"codex": False})
+        self.assertEqual({path.name: path.read_bytes() for path in self.root.iterdir()}, before)
 
     def test_existing_proxy_upgrade_replaces_old_model_and_keeps_backup(self):
         self.primary.write_text('model = "old-model"\n', encoding="utf-8")
         self.service.write_codex_proxy_config()
         backups = set(self.root.glob("*.bak.*"))
         current = self.primary.read_text(encoding="utf-8").replace(
-            excel_upstream.MODEL_ID, "old-model"
+            excel_models.UPSTREAM_MODEL, "old-model"
         )
         self.primary.write_text(current, encoding="utf-8")
         self.service.write_codex_proxy_config()
         self.assertEqual(
             tomllib.loads(self.primary.read_text(encoding="utf-8"))["model"],
-            excel_upstream.MODEL_ID,
+            excel_models.UPSTREAM_MODEL,
         )
         self.assertEqual(set(self.root.glob("*.bak.*")), backups)
 
@@ -133,6 +146,131 @@ class ExcelConfigLifecycleTests(unittest.TestCase):
         self.assertEqual(
             self.service.load_client_proxy_settings()["pending_restore_targets"], []
         )
+
+    def test_install_and_repair_preserve_custom_catalog_settings_and_selected_model(self):
+        custom_catalog = self.root / "custom-models.json"
+        custom_catalog.write_text("user catalog", encoding="utf-8")
+        original = (
+            'model = "gpt-6-astra-excel"\n'
+            f"model_catalog_json = {json.dumps(str(custom_catalog))}\n"
+            'model_verbosity = "high"\n'
+            'base_instructions = """custom instructions\n[not a section]\nmodel = "text"\n"""\n'
+            'approvals_reviewer = "auto"\n'
+            'truncation_policy = { mode = "tokens", limit = 55555 }\n'
+            "model_context_window = 123456\n"
+            "model_auto_compact_token_limit = 100000\n"
+        )
+        self.primary.write_text(original, encoding="utf-8")
+        self.service.write_codex_proxy_config()
+        managed = self.managed.read_text(encoding="utf-8") + '\n[features]\ncustom_feature = true\n'
+        self.managed.write_text(managed, encoding="utf-8")
+        backups = {path.name: path.read_bytes() for path in self.root.glob("*.bak.*")}
+        self.service.write_codex_proxy_config()
+        primary = tomllib.loads(self.primary.read_text(encoding="utf-8"))
+        for key, value in tomllib.loads(original).items():
+            self.assertEqual(primary[key], "gpt-6-astra" if key == "model" else value)
+        repaired = tomllib.loads(self.managed.read_text(encoding="utf-8"))
+        self.assertEqual(repaired["model"], "gpt-6-astra")
+        self.assertTrue(repaired["features"]["custom_feature"])
+        self.assertEqual({path.name: path.read_bytes() for path in self.root.glob("*.bak.*")}, backups)
+        self.assertEqual(custom_catalog.read_text(encoding="utf-8"), "user catalog")
+        self.assertFalse(self.catalog.exists())
+
+    def test_fresh_install_uses_bare_model_without_a_catalog(self):
+        result = self.service.write_codex_proxy_config()
+        self.assertTrue(result["configured"])
+        managed = tomllib.loads(self.managed.read_text(encoding="utf-8"))
+        self.assertEqual(managed["model"], excel_models.UPSTREAM_MODEL)
+        for key in ("model_catalog_json", "base_instructions", "model_verbosity", "truncation_policy"):
+            self.assertNotIn(key, managed)
+        self.assertFalse(self.catalog.exists())
+
+    def test_supported_bare_model_choice_survives_installation(self):
+        for model in excel_models.EXCEL_MODEL_UPSTREAMS.values():
+            with self.subTest(model=model):
+                merged = self.service._merged_codex_primary_config(f"model = {json.dumps(model)}\n")
+                self.assertEqual(tomllib.loads(merged)["model"], model)
+
+    def test_migration_retains_custom_managed_limits_and_existing_backups(self):
+        original = (
+            f"model_catalog_json = {json.dumps(str(self.catalog))}\n"
+            "model_context_window = 500000\n"
+            "model_auto_compact_token_limit = 450000\n"
+            + CODEX_PROXY_CONFIG
+        )
+        self.managed.write_text(original, encoding="utf-8")
+        backup = Path(self.service._backup_config_file(str(self.managed)))
+        before = backup.read_bytes()
+        self.assertTrue(self.service.refresh_codex_model_catalog())
+        managed = tomllib.loads(self.managed.read_text(encoding="utf-8"))
+        self.assertEqual(managed["model_context_window"], 500000)
+        self.assertEqual(managed["model_auto_compact_token_limit"], 450000)
+        self.assertEqual(backup.read_bytes(), before)
+        self.assertEqual(list(self.root.glob("*.bak.*")), [backup])
+
+    def test_migration_backup_is_not_restored_as_an_original_config(self):
+        legacy = f"model_catalog_json = {json.dumps(str(self.catalog))}\n" + CODEX_PROXY_CONFIG
+        self.managed.write_text(legacy, encoding="utf-8")
+        self.assertTrue(self.service.refresh_codex_model_catalog())
+        backup = next(self.root.glob("*.migration.bak.*"))
+        self.assertIsNone(self.service._latest_backup_path(str(self.managed)))
+        self.assertFalse(self.service.disable_codex_proxy_config()["configured"])
+        self.assertFalse(self.managed.exists())
+        self.assertEqual(backup.read_text(encoding="utf-8"), legacy)
+
+    def test_new_install_backs_up_current_user_config_without_overwriting_old_backup(self):
+        self.primary.write_text('model = "user-old"\n', encoding="utf-8")
+        old_backup = Path(self.service._backup_config_file(str(self.primary)))
+        os.utime(old_backup, (1, 1))
+        original = 'model = "user-now"\n'
+        self.primary.write_text(original, encoding="utf-8")
+        self.service.write_codex_proxy_config()
+        self.assertEqual(len(list(self.root.glob("*.ghcp-proxy.bak.*"))), 2)
+        self.service.disable_codex_proxy_config()
+        self.assertEqual(self.primary.read_text(encoding="utf-8"), original)
+        self.assertEqual(old_backup.read_text(encoding="utf-8"), 'model = "user-old"\n')
+
+    def test_startup_refresh_leaves_unrelated_configuration_unchanged(self):
+        original = 'model = "user-model"\nmodel_catalog_json = "custom.json"\n'
+        self.primary.write_text(original, encoding="utf-8")
+        self.managed.write_text(original, encoding="utf-8")
+        self.catalog.write_text("old unused file", encoding="utf-8")
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+        self.assertEqual(self.service.refresh_client_model_metadata(), {"codex": False})
+        self.assertEqual({path.name: path.read_bytes() for path in self.root.iterdir()}, before)
+
+    def test_invalid_existing_config_is_preserved_during_startup_and_install(self):
+        self.primary.write_text("model = [", encoding="utf-8")
+        original = self.primary.read_bytes()
+        diagnostic = io.StringIO()
+        with redirect_stdout(diagnostic):
+            self.assertEqual(self.service.refresh_client_model_metadata(), {"codex": False})
+        self.assertIn("could not migrate", diagnostic.getvalue())
+        result = self.service.write_codex_proxy_config()
+        self.assertTrue(result["error"])
+        self.assertEqual(self.primary.read_bytes(), original)
+        self.assertFalse(self.managed.exists())
+        self.assertFalse(list(self.root.glob("*.bak.*")))
+
+    def test_provider_comments_and_literal_dotted_names_are_preserved(self):
+        original = (
+            '[model_providers."custom"] # own provider\n'
+            'http_headers = { "X-Local" = "keep" }\n'
+            '[model_providers."custom.http_headers"]\n'
+            'name = "different provider"\n'
+        )
+        parsed = tomllib.loads(self.service._merged_codex_primary_config(original))
+        self.assertEqual(parsed["model_providers"]["custom.http_headers"], {"name": "different provider"})
+        self.assertEqual(parsed["model_providers"]["custom"]["http_headers"]["X-Local"], "keep")
+
+    def test_disabling_keeps_the_unused_legacy_catalog_file(self):
+        self.primary.write_text('model = "original"\n', encoding="utf-8")
+        self.service.write_codex_proxy_config()
+        self.catalog.write_text("old unused file", encoding="utf-8")
+        self.service.disable_codex_proxy_config()
+        self.assertEqual(self.catalog.read_text(encoding="utf-8"), "old unused file")
+        self.assertFalse(self.service.codex_proxy_status()["configured"])
+        self.assertFalse(self.service.codex_proxy_status()["exists"])
 
 
 class ReasoningLevelTests(unittest.TestCase):
@@ -230,8 +368,8 @@ class ExcelCodexInstructionsTests(unittest.TestCase):
                 self.assertEqual(models[model_id]["base_instructions"], self.prompt)
         self.assertEqual(set(models), set(excel_upstream.MODEL_IDS))
 
-    def test_catalog_prompt_survives_request_and_tool_result_replay(self):
-        instructions = self._models()["gpt-5.6-sol-excel"]["base_instructions"]
+    def test_explicit_client_instructions_survive_request_and_tool_result_replay(self):
+        instructions = "Native client model instructions. Preserve the user's workspace rules."
         environment = excel_upstream._message_item(
             "developer", "Workspace: /repo. Respect the current permission rules."
         )
@@ -246,10 +384,10 @@ class ExcelCodexInstructionsTests(unittest.TestCase):
         }
         first = excel_upstream.prepare_responses_body(source)
         self.assertEqual(
-            first["input"][0], excel_upstream._message_item("developer", self.prompt)
+            first["input"][0], excel_upstream._message_item("developer", instructions)
         )
         self.assertIn(environment, first["input"])
-        self.assertIn('"name":"exec_command"', first["input"][1]["content"][0]["text"])
+        self.assertIn('Client tool "exec_command" (function).', first["input"][1]["content"][0]["text"])
         source["input"].extend(
             [
                 {

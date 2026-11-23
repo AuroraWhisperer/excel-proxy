@@ -56,8 +56,8 @@ def proxy_non_streaming_response(upstream: httpx.Response) -> Response:
     such as SSE-style frames. When JSON parsing fails, fall back to relaying
     the raw body with the upstream content type instead of crashing.
     """
-    headers = {}
-    for name in ("content-type", "cache-control", "retry-after"):
+    headers = upstream_errors.retry_after_headers(upstream.headers)
+    for name in ("content-type", "cache-control"):
         value = upstream.headers.get(name)
         if value:
             headers[name] = value
@@ -162,11 +162,9 @@ class ExcelResponseProcessor:
             upstream=upstream,
             response_payload=payload,
         )
-        headers = {
-            name: upstream.headers[name]
-            for name in ("x-request-id", "retry-after")
-            if name in upstream.headers
-        }
+        headers = upstream_errors.retry_after_headers(upstream.headers)
+        if "x-request-id" in upstream.headers:
+            headers["x-request-id"] = upstream.headers["x-request-id"]
         response = JSONResponse(
             content=upstream_errors.excel_error_payload(upstream.status_code, payload),
             status_code=upstream.status_code,
@@ -187,6 +185,15 @@ class ExcelResponseProcessor:
         allowed_tools = excel_tool_catalog.client_tool_types(source_body)
         output_format = structured_output.request_format(source_body)
         marker_open = excel_tool_catalog.TOOL_CALL_MARKER_OPEN
+
+        def record_reported_model(response):
+            if (
+                isinstance(response, dict)
+                and isinstance(response.get("model"), str)
+                and trace_plan is not None
+                and isinstance(trace_plan.usage_event, dict)
+            ):
+                trace_plan.usage_event["response_model"] = response["model"]
 
         def _marker_hold_length(text: str) -> int:
             """Length of the text suffix that could still become a marker open tag."""
@@ -240,6 +247,7 @@ class ExcelResponseProcessor:
                         continue
                     if not isinstance(payload, dict):
                         continue
+                    record_reported_model(payload.get("response"))
                     event_type = (
                         str(event_name or payload.get("type") or "").strip().lower()
                     )
@@ -453,6 +461,7 @@ class ExcelResponseProcessor:
                                     if not done:
                                         yield b": keep-alive\n\n"
                                 response = repair_task.result()
+                                record_reported_model(response)
                             finally:
                                 if not repair_task.done():
                                     repair_task.cancel()
@@ -609,6 +618,8 @@ class ExcelResponseProcessor:
         response: dict,
         client_body: dict,
         diagnostics: dict,
+        *,
+        downstream_request=None,
     ) -> dict:
         """One corrective generation after a completed, unexposed tool failure."""
         repair_body = excel_tool_recovery.unknown_tool_regeneration_request(
@@ -640,14 +651,28 @@ class ExcelResponseProcessor:
         if original_usage is not None:
             recovery["usage"] = original_usage
         plan.trace_context["tool_call_recovery"] = recovery
+
+        def record_upstream_identity(sending):
+            if sending:
+                metadata = repair_body.get("metadata", {})
+                recovery["upstream_identity"] = {
+                    key: metadata[key]
+                    for key in ("task_id", "turn_id", "agent_iteration")
+                    if key in metadata
+                }
+
         client = self.get_upstream_client()
         upstream = None
         ended = False
         try:
             request = client.build_request(
-                "POST", plan.upstream_url, headers=plan.headers, json=repair_body
+                "POST", plan.upstream_url, headers=plan.headers, json=repair_body,
+                extensions={"excel_body": repair_body},
             )
-            upstream = await throttled_client_send(client, request, stream=True)
+            upstream = await throttled_client_send(
+                client, request, stream=True, downstream_request=downstream_request,
+                on_send_state=record_upstream_identity,
+            )
             if upstream.status_code >= 400:
                 ended = True
                 safe_error = upstream_errors.excel_error_payload(upstream.status_code)[
@@ -657,6 +682,7 @@ class ExcelResponseProcessor:
                     safe_error["code"],
                     safe_error["message"],
                     status_code=upstream.status_code,
+                    headers=upstream_errors.retry_after_headers(upstream.headers),
                 )
             if "text/event-stream" in upstream.headers.get("content-type", "").lower():
                 repaired = await self.read_response_payload(upstream)
@@ -758,6 +784,8 @@ class ExcelResponseProcessor:
                 code=code,
                 error_type=type(exc).__name__,
             )
+            if isinstance(exc, upstream_errors.ExcelResponseError):
+                raise
             raise upstream_errors.ExcelResponseError(
                 code, message, status_code=status
             ) from exc
@@ -773,6 +801,7 @@ class ExcelResponseProcessor:
         plan: UpstreamRequestPlan,
         *,
         client_body: dict,
+        downstream_request=None,
     ) -> Response:
         excel_model_id = (
             excel_models.excel_model_id(client_body.get("model"))
@@ -788,9 +817,13 @@ class ExcelResponseProcessor:
                 plan.upstream_url,
                 headers=plan.headers,
                 json=plan.body,
+                extensions={"excel_body": plan.body},
             )
             # Only the shared connect-only retry policy is safe for a model POST.
-            upstream = await throttled_client_send(client, request, stream=True)
+            upstream = await throttled_client_send(
+                client, request, stream=True, downstream_request=downstream_request,
+                on_send_state=plan.on_send_state,
+            )
             if upstream.status_code >= 400:
                 await upstream.aread()
                 return self.handle_upstream_error(
@@ -825,7 +858,8 @@ class ExcelResponseProcessor:
                 if calls is None and output_format is None:
                     await upstream.aclose()
                     response_payload = await self.repair_tool_response(
-                        plan, response_payload, client_body, diagnostics
+                        plan, response_payload, client_body, diagnostics,
+                        downstream_request=downstream_request,
                     )
         except asyncio.CancelledError:
             self.finish_usage_and_trace(plan, 499, upstream=upstream)
@@ -835,6 +869,7 @@ class ExcelResponseProcessor:
                 "error": {
                     "type": "server_error"
                     if exc.status_code >= 500
+                    else "rate_limit_error" if exc.status_code == 429
                     else "invalid_request_error",
                     "code": exc.code,
                     "message": str(exc),
@@ -851,7 +886,7 @@ class ExcelResponseProcessor:
                 response_payload=payload,
                 error=exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
+            return JSONResponse(status_code=exc.status_code, content=payload, headers=exc.headers)
         except httpx.RequestError as exc:
             status_code, message = (
                 responses_protocol.upstream_request_error_status_and_message(exc)
@@ -873,7 +908,7 @@ class ExcelResponseProcessor:
             return responses_protocol.openai_error_response(502, message)
 
         translated_payload = dict(response_payload)
-        translated_payload["model"] = excel_model_id
+        translated_payload.setdefault("model", excel_model_id)
         if response_payload.get("status") in {"failed", "incomplete"}:
             self.finish_usage_and_trace(
                 plan, 502, upstream=upstream, response_payload=response_payload

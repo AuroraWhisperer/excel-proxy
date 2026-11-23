@@ -3,6 +3,7 @@
 Run with the repository virtual environment and open http://127.0.0.1:8000.
 """
 
+import atexit
 import os
 import sys
 
@@ -38,21 +39,26 @@ def _prepare_standalone_process_file_descriptors():
 
 if __name__ == "__main__":
     _prepare_standalone_process_file_descriptors()
+    from app_paths import lock_service_state, user_state_dir
+
+    try:
+        # Take ownership before imports can migrate state or restore client settings.
+        _service_lock = lock_service_state(user_state_dir())
+    except (OSError, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from None
+    atexit.register(_service_lock.close)
 
 
 import asyncio
 import account_balances
 import account_login
 import proxy_accounts
-import atexit
 import background_proxy
-import codex_agent_compat
 import dashboard as dashboard_module
 from excel_responses import ExcelResponseProcessor
 import excel_image_generation
 import excel_images
 import excel_models
-import excel_session_capture
 import excel_upstream
 import responses_protocol
 import hashlib
@@ -65,6 +71,7 @@ import upstream_errors
 import usage_tracking
 import util
 from contextlib import nullcontext
+from functools import partial
 from threading import Lock, Thread
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -75,9 +82,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from local_access import LocalAccessMiddleware
 from upstream_request import UpstreamRequestPlan
-from upstream_client import (
-    get_excel_upstream_client as _get_excel_upstream_client,
-)
+from upstream_client import get_excel_upstream_client
+from excel_websocket import websocket_mounts
 from usage_storage import create_usage_archive_store
 from responses_stream import (
     StreamDependencies,
@@ -116,7 +122,7 @@ from constants import (
     REQUEST_PROMPT_ARCHIVE_DIR,
 )
 
-from rate_limiting import throttled_client_send
+from rate_limiting import generation_admission, throttled_client_send
 
 
 # ─── App & Global State ──────────────────────────────────────────────────────
@@ -471,30 +477,6 @@ async def _app_shutdown_wait_for_usage_history():
 
 @app.on_event("startup")
 async def _app_startup_restore_client_proxy_configs():
-    excel_upstream.excel_session_store.load()
-    try:
-        legacy_source = (
-            proxy_accounts.proxy_account_store.snapshot()["source"] == "excel"
-        )
-    except account_balances.BalanceError:
-        legacy_source = (
-            False  # A damaged account file must never select another identity.
-        )
-    if legacy_source:
-        asyncio.create_task(
-            asyncio.to_thread(
-                excel_session_capture.refresh_macos_excel_session,
-                excel_upstream.excel_session_store,
-                force=True,
-            )
-        )
-        asyncio.create_task(
-            asyncio.to_thread(
-                excel_session_capture.refresh_windows_excel_session,
-                excel_upstream.excel_session_store,
-                force=True,
-            )
-        )
     restore_client_proxy_configs_on_startup()
     client_proxy_config_service.refresh_client_model_metadata()
 
@@ -735,7 +717,7 @@ def _dump_outbound_request_body(
     upstream_body: dict | None,
     outbound_headers: dict | None,
 ) -> None:
-    """Persist the exact outbound body and full headers for an approved capture."""
+    """Persist the prepared payload and headers before WebSocket frame wrapping."""
     if not request_body_dump_enabled():
         return
     try:
@@ -794,6 +776,7 @@ def _emit_request_trace_start(
     outbound_headers: dict | None,
     trace_metadata: dict | None = None,
     prompt_preview: dict | None = None,
+    defer_body_dump: bool = False,
 ) -> dict:
     parsed_upstream = urlsplit(upstream_url)
     context = {
@@ -855,7 +838,7 @@ def _emit_request_trace_start(
         payload["initiator_verdict"] = initiator_verdict
         context["initiator_verdict"] = initiator_verdict
     _append_request_trace(payload)
-    if debug_detail_capture is not None:
+    if debug_detail_capture is not None and not defer_body_dump:
         _dump_outbound_request_body(
             request_id=request_id,
             context=context,
@@ -892,6 +875,23 @@ def _finish_usage_and_trace(
     if isinstance(plan, UpstreamRequestPlan):
         if not isinstance(plan.trace_context, dict):
             plan.trace_context = {}
+        metadata = plan.body.get("metadata", {})
+        if isinstance(metadata, dict) and all(metadata.get(key) for key in ("task_id", "turn_id")):
+            identity = {
+                key: metadata[key]
+                for key in ("task_id", "turn_id", "agent_iteration")
+                if key in metadata
+            }
+            plan.trace_context["upstream_identity"] = identity
+            plan.trace_context["upstream_model"] = plan.body.get("model")
+            if isinstance(plan.usage_event, dict):
+                plan.usage_event["upstream_identity"] = identity
+                plan.usage_event["upstream_model"] = plan.body.get("model")
+        response_model = response_payload.get("model") if isinstance(response_payload, dict) else None
+        if not response_model and isinstance(plan.usage_event, dict):
+            response_model = plan.usage_event.get("response_model")
+        if isinstance(response_model, str) and response_model:
+            plan.trace_context["response_model"] = response_model
         diagnostics = plan.trace_context.get("tool_call_diagnostics")
         if isinstance(diagnostics, dict) and isinstance(plan.usage_event, dict):
             plan.usage_event["tool_call_diagnostics"] = diagnostics
@@ -1115,6 +1115,7 @@ def _prepare_upstream_request(
             outbound_headers=headers,
             trace_metadata=trace_metadata,
             prompt_preview=stored_prompt_preview,
+            defer_body_dump=True,
         )
         if (
             isinstance(usage_event, dict)
@@ -1123,6 +1124,27 @@ def _prepare_upstream_request(
             and "request_prompt" in trace_context
         ):
             usage_event["request_prompt"] = trace_context["request_prompt"]
+    dispatched = False
+
+    def record_dispatch(sending):
+        nonlocal dispatched
+        if not sending or dispatched:
+            return
+        dispatched = True
+        # Admission assigns task/turn immediately before this callback. A
+        # pre-admission snapshot would not match the serialized request.
+        if _trace_context_allows_full_debug_detail(trace_context):
+            _dump_outbound_request_body(
+                request_id=request_id,
+                context=trace_context,
+                request=request,
+                requested_model=requested_model,
+                resolved_model=resolved_model,
+                request_body=source_body if isinstance(source_body, dict) else body,
+                upstream_body=body,
+                outbound_headers=headers,
+            )
+
     return (
         UpstreamRequestPlan(
             request_id=request_id,
@@ -1143,6 +1165,7 @@ def _prepare_upstream_request(
                 else None
             ),
             trace_context=trace_context,
+            on_send_state=record_dispatch,
         ),
         None,
     )
@@ -1252,6 +1275,7 @@ def _load_request_prompt_payload(request_id: str) -> dict:
 proxy_login_service = account_login.AccountLoginService(
     proxy_accounts.proxy_account_store, offline_access=True
 )
+_get_excel_upstream_client = partial(get_excel_upstream_client, mounts_for=websocket_mounts)
 _proxy_activation_lock = asyncio.Lock()
 
 
@@ -1264,16 +1288,9 @@ async def _selected_excel_headers(*, stream=False):
             stream=stream,
             active=True,
         )
-    if selection["source"] == "none":
-        raise account_balances.BalanceError(
-            "未启用连接账号，请在首页登录或选择已保存的账号。", 401
-        )
-    for refresh in (
-        excel_session_capture.refresh_macos_excel_session,
-        excel_session_capture.refresh_windows_excel_session,
-    ):
-        await asyncio.to_thread(refresh, excel_upstream.excel_session_store, force=True)
-    return excel_upstream.excel_session_store.request_headers(stream=stream)
+    raise account_balances.BalanceError(
+        "未启用连接账号，请在首页登录或选择已保存的账号。", 401
+    )
 
 
 _EXCEL_CONNECTION_TEST_TIMEOUT_SECONDS = 30
@@ -1349,10 +1366,13 @@ async def _run_excel_connection_test(
         response.status_code,
         "upstream" if code == "excel_upstream_error" else "protocol",
     )
-    if code == "basispoints_model_access_changed":
+    if code in {"basispoints_model_access_changed", "request_rejected"}:
         category = "access"
+    if code in {"excel_queue_full", "excel_queue_timeout"}:
+        category = "local_capacity"
     messages = {
-        "authentication": "Refresh the signed-in Excel add-in session and test again.",
+        "local_capacity": "The local generation queue is busy. Wait for an active request to finish.",
+        "authentication": "Sign in again to the selected connection account and test again.",
         "access": "This Excel account cannot access the selected model or endpoint.",
         "rate_limit": "The Excel endpoint is rate limited. Test again later.",
         "timeout": "The Excel connection test timed out. Check the connection and try again.",
@@ -1440,8 +1460,7 @@ async def _send_excel_responses(
     )
     try:
         upstream_body = excel_upstream.prepare_responses_body(
-            body,
-            tools_version_id=excel_upstream.excel_session_store.tools_version_id(),
+            body, cache_scope=request.headers.get("session_id", "").strip() or "local"
         )
     except ValueError as exc:
         return responses_protocol.openai_error_response(
@@ -1451,8 +1470,8 @@ async def _send_excel_responses(
     client = _get_excel_upstream_client()
     for attempt in range(2):
         try:
-            # Preserve task/turn identity from the original image data, even
-            # when an expired attachment needs to be uploaded with a new ID.
+            # Rewrite attachments before admission assigns this generation's
+            # slot task and fresh turn, including after an expired upload.
             image_body, reused_images = await excel_images.image_uploads.rewrite(
                 upstream_body,
                 client,
@@ -1468,6 +1487,7 @@ async def _send_excel_responses(
                 status if status >= 400 else 502,
                 f"Excel image upload failed (HTTP {status}). Retry the request.",
                 param="input",
+                headers=upstream_errors.retry_after_headers(exc.response.headers),
             )
             response._excel_auth_rejected = status == 401
             return response
@@ -1524,7 +1544,7 @@ async def _send_excel_responses(
             )
         else:
             response = await response_processor.post_non_streaming_request(
-                plan, client_body=body
+                plan, client_body=body, downstream_request=request
             )
         if attempt == 0 and reused_images and response.status_code in {400, 404, 422}:
             excel_images.image_uploads.forget(reused_images)
@@ -1561,7 +1581,7 @@ async def _handle_excel_image_request(request: Request, *, edit: bool) -> Respon
         return responses_protocol.openai_error_response(exc.status_code, str(exc))
     except RuntimeError:
         return responses_protocol.openai_error_response(
-            401, "Refresh the signed-in Excel add-in session."
+            401, "Sign in again to the selected connection account."
         )
     headers = {
         key: value
@@ -1584,7 +1604,11 @@ async def _handle_excel_image_request(request: Request, *, edit: bool) -> Respon
             **send,
         )
         upstream = await throttled_client_send(
-            client, upstream_request, follow_redirects=False
+            client, upstream_request, follow_redirects=False, downstream_request=request
+        )
+    except upstream_errors.ExcelResponseError as exc:
+        return responses_protocol.openai_error_response(
+            exc.status_code, str(exc), code=exc.code, headers=exc.headers,
         )
     except httpx.RequestError as exc:
         status, message = responses_protocol.upstream_request_error_status_and_message(
@@ -1594,7 +1618,8 @@ async def _handle_excel_image_request(request: Request, *, edit: bool) -> Respon
     if upstream.status_code >= 300:
         status = upstream.status_code if upstream.status_code >= 400 else 502
         return JSONResponse(
-            status_code=status, content=upstream_errors.excel_error_payload(status)
+            status_code=status, content=upstream_errors.excel_error_payload(status),
+            headers=upstream_errors.retry_after_headers(upstream.headers),
         )
     try:
         payload = excel_image_generation.validate_response(upstream.json())
@@ -1632,7 +1657,6 @@ async def responses(request: Request):
             and str(exc.detail).startswith("Unsupported model")
             else None,
         )
-    body = codex_agent_compat.normalize_codex_agent_tools(body)
     return await _handle_excel_responses(request, body)
 
 
@@ -1656,7 +1680,7 @@ async def responses_compact(request: Request):
     summary_request = responses_protocol.build_fake_compaction_request(body)
     summary_request["stream"] = False
     summary_request.pop("tools", None)
-    summary_request.pop("tool_choice", None)
+    summary_request["tool_choice"] = "none"
     summary_request.pop("parallel_tool_calls", None)
     response = await _handle_excel_responses(
         request,
@@ -1702,6 +1726,27 @@ async def responses_compact(request: Request):
 
 
 # ─── Excel model catalog ────────────────────────────────────────────────────
+
+
+@app.get("/healthz")
+async def healthz():
+    try:
+        selection = await asyncio.to_thread(proxy_accounts.proxy_account_store.snapshot)
+        active = next((row for row in selection["accounts"] if row["active"]), None)
+        if selection["source"] != "oauth" or active is None:
+            credential = "missing"
+        elif not active["expired"]:
+            credential = "available"
+        else:
+            credential = "renewable" if active["renewable"] else "expired"
+    except account_balances.BalanceError:
+        credential = "unreadable"
+    ok = credential in {"available", "renewable"}
+    return JSONResponse(
+        {"ok": ok, "credential": credential, "generation_queue": generation_admission.snapshot()},
+        status_code=200 if ok else 503,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/models")
@@ -1768,7 +1813,7 @@ if __name__ == "__main__":
         target=_prewarm_dashboard_payload, name="dashboard-prewarm", daemon=True
     ).start()
     print("Starting Excel connection service on http://127.0.0.1:8000 (loopback only)", flush=True)
-    print("  Sign in to the official Excel add-in, then open the dashboard.", flush=True)
+    print("  Open the dashboard to sign in or select a ChatGPT account.", flush=True)
     print("  Responses API: POST /v1/responses", flush=True)
     print("  Compaction:    POST /v1/responses/compact", flush=True)
     _write_proxy_pid_file()

@@ -3,7 +3,9 @@
 from contextlib import nullcontext
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -13,6 +15,29 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import windows_launcher as launcher
+from app_paths import lock_service_state
+
+
+class ServiceStateOwnershipTests(unittest.TestCase):
+    def test_standalone_entrypoint_rejects_second_owner_before_loading_application(self):
+        # If the early guard regresses, stop at the first app import, not a live server.
+        entrypoint = Path(__file__).resolve().parents[1] / "app" / "proxy.py"
+        run = (
+            "import runpy,sys; sys.modules['account_balances']=None; "
+            "runpy.run_path(sys.argv[1], run_name='__main__')"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with lock_service_state(directory), lock_service_state(Path(directory) / "other"):
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", run, str(entrypoint)],
+                    env={**os.environ, "GHCP_STATE_DIR": directory},
+                    capture_output=True, text=True, timeout=5,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("owns this state directory", result.stderr)
+                self.assertFalse((Path(directory) / "ghcp-proxy.pid").exists())
+            with lock_service_state(directory):
+                self.assertTrue((Path(directory) / "service.lock").is_file())
 
 
 class DesktopLaunchTests(unittest.TestCase):
@@ -103,9 +128,9 @@ class DesktopLaunchTests(unittest.TestCase):
         start.assert_called_once()
         webview.start.assert_called_once()
         self.assertEqual(webview.create_window.call_args.kwargs["width"], 1280)
-        self.assertEqual(webview.create_window.call_args.kwargs["height"], 720)
+        self.assertEqual(webview.create_window.call_args.kwargs["height"], 820)
         self.assertEqual(
-            webview.create_window.call_args.kwargs["background_color"], "#f4f6f2"
+            webview.create_window.call_args.kwargs["background_color"], "#f8f3ec"
         )
         stop.assert_called_once()
 

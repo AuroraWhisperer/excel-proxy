@@ -17,6 +17,7 @@ from account_identity import (
     account_session_headers,
 )
 from account_login import refresh_credentials
+import bps_device_auth
 from app_paths import user_config_dir
 from windows_dpapi import (
     protect_data as _protect_windows_data,
@@ -53,6 +54,9 @@ def _normalize(payload):
         refresh and not re.fullmatch(r"[!-~]{1,32768}", refresh)
     ):
         raise BalanceError("登录刷新凭据无效，请重新登录。")
+    client_id = credentials.get("client_id") or payload.get("client_id") or claims.get("client_id")
+    if client_id == bps_device_auth.CLIENT_ID:
+        account["client_id"] = client_id
     account.update(
         expires_at=expires,
         refresh_token=refresh,
@@ -70,9 +74,7 @@ class ProxyAccountStore:
         self._accounts = {}
         self._pending = {}
         self._active_id = None
-        # Preserve the previous installation until the user explicitly selects
-        # direct login or removes its active account. Never fall back thereafter.
-        self._source = "excel"
+        self._source = "none"
 
     def _load(self):
         if self._loaded:
@@ -80,8 +82,10 @@ class ProxyAccountStore:
         if self.path and self.path.exists():
             try:
                 data = json.loads(_unprotect_windows_data(self.path.read_bytes()))
-                if data["version"] != 1 or data["source"] not in (
-                    "excel",
+                source = data["source"]
+                if source == "excel":
+                    source = "none"
+                if data["version"] != 1 or source not in (
                     "oauth",
                     "none",
                 ):
@@ -100,14 +104,14 @@ class ProxyAccountStore:
                 if not pending.keys() <= accounts.keys():
                     raise ValueError()
                 active = data["active_id"]
-                if (data["source"] == "oauth" and active not in accounts) or (
-                    data["source"] != "oauth" and active is not None
+                if (source == "oauth" and active not in accounts) or (
+                    source != "oauth" and active is not None
                 ):
                     raise ValueError()
                 self._accounts, self._active_id, self._source = (
                     accounts,
                     active,
-                    data["source"],
+                    source,
                 )
                 self._pending = pending
             except (
@@ -271,7 +275,8 @@ class ProxyAccountStore:
                 "refresh_token"
             ]:
                 try:
-                    payload = refresh_credentials(row["refresh_token"])
+                    issuer = {"client_id": row["client_id"]} if row.get("client_id") else {}
+                    payload = refresh_credentials(row["refresh_token"], **issuer)
                 except BalanceError as exc:
                     if exc.status_code == 401:
                         with self._lock:
@@ -294,6 +299,7 @@ class ProxyAccountStore:
                 new_id, replacement = _normalize(
                     {
                         **payload,
+                        "client_id": row.get("client_id"),
                         "name": row["name"],
                         "refresh_token": payload.get("refresh_token")
                         or row["refresh_token"],
@@ -347,12 +353,6 @@ class ProxyAccountStore:
                     if key != record_id
                 },
             )
-            return self.snapshot()
-
-    def use_excel(self):
-        with self._lock:
-            self._load()
-            self._commit(self._accounts, None, "excel")
             return self.snapshot()
 
     def remove(self, record_id):

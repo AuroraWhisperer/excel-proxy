@@ -15,8 +15,6 @@ import account_login
 import codex_quota
 import dashboard as dashboard_module
 import excel_models
-import excel_session
-import excel_session_capture
 import responses_protocol
 import proxy_accounts
 from codex_config import ProxyClientConfigService
@@ -356,12 +354,19 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
                         403: "该账号不能使用所选 Excel/BPS 模型。",
                         429: "该账号暂时受限，请稍后重试或手动选择其他账号。",
                     }
-                    raise account_balances.BalanceError(
-                        messages.get(
+                    code = (result.get("error") or {}).get("code")
+                    if code in {"excel_queue_full", "excel_queue_timeout"}:
+                        messages[429] = "本地生成队列繁忙，请等待正在运行的请求完成。"
+                    detail_message = (
+                        "Excel/BPS 拒绝了此账号的请求，请确认已选择有 Excel 权限的工作空间并使用 Excel 授权重新登录。"
+                        if code == "request_rejected"
+                        else messages.get(
                             response.status_code,
                             "未获得完整模型回复，请检查网络或在高级设置中更换测试模型。",
                         )
-                        + " 原连接账号保持不变。",
+                    )
+                    raise account_balances.BalanceError(
+                        detail_message + " 原连接账号保持不变。",
                         response.status_code if response.status_code >= 400 else 502,
                     )
                 state = await asyncio.to_thread(
@@ -421,54 +426,30 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
             )
         except account_balances.BalanceError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
-        if selection["source"] != "excel":
-            active = next((row for row in selection["accounts"] if row["active"]), None)
-            return JSONResponse(
-                {
-                    "source": selection["source"],
-                    "configured": active is not None,
-                    "expired": bool(
-                        active and active["expired"] and not active["renewable"]
-                    ),
-                    "expires_at": active["expires_at"] if active else None,
-                    "account_name": active["name"] if active else None,
-                    "renewable": bool(active and active["renewable"]),
-                    "persisted": True,
-                    "models": [
-                        {
-                            "id": key,
-                            "display_name": excel_models.LOCAL_MODEL_CAPABILITIES[key][
-                                "display_name"
-                            ],
-                        }
-                        for key in excel_models.MODEL_IDS
-                    ],
-                    "default_model": excel_models.MODEL_ID,
-                },
-                headers={"Cache-Control": "no-store"},
-            )
-        excel_session_capture.refresh_macos_excel_session(
-            excel_session.excel_session_store,
-        )
-        excel_session_capture.refresh_windows_excel_session(
-            excel_session.excel_session_store,
-        )
+        active = next((row for row in selection["accounts"] if row["active"]), None)
         return JSONResponse(
-            content={
-                **excel_session.excel_session_store.status(),
-                "source": "excel",
-                "capture": excel_session_capture.cached_session_reader_status(),
+            {
+                "source": selection["source"],
+                "configured": active is not None,
+                "expired": bool(
+                    active and active["expired"] and not active["renewable"]
+                ),
+                "expires_at": active["expires_at"] if active else None,
+                "account_name": active["name"] if active else None,
+                "renewable": bool(active and active["renewable"]),
+                "persisted": True,
                 "models": [
                     {
-                        "id": model_id,
-                        "display_name": excel_models.LOCAL_MODEL_CAPABILITIES[model_id][
+                        "id": key,
+                        "display_name": excel_models.LOCAL_MODEL_CAPABILITIES[key][
                             "display_name"
                         ],
                     }
-                    for model_id in excel_models.MODEL_IDS
+                    for key in excel_models.MODEL_IDS
                 ],
                 "default_model": excel_models.MODEL_ID,
-            }
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
     @router.post("/api/config/excel-session/test")
@@ -495,69 +476,5 @@ def create_account_router(dependencies: AccountRouteDependencies) -> APIRouter:
         if model is None:
             raise HTTPException(status_code=400, detail="Select a listed Excel model.")
         return await dependencies.run_connection_test(request, model)
-
-    @router.post("/api/config/excel-session")
-    async def excel_session_config_api(request: Request):
-        payload = await dependencies.parse_json_request(request)
-        action = str(payload.get("action") or "").strip().lower()
-        if action in {"cancel_capture", "cancel_read"}:
-            return JSONResponse(
-                content={
-                    **excel_session.excel_session_store.status(),
-                    "capture": excel_session_capture.cached_session_reader_status(),
-                }
-            )
-        if action in {"capture", "read_cached"}:
-            if dependencies.activation_lock.locked():
-                raise HTTPException(
-                    status_code=409,
-                    detail="正在验证并切换账号，请稍后再读取 Excel 会话。",
-                )
-            async with dependencies.activation_lock:
-                for refresh in (
-                    excel_session_capture.refresh_macos_excel_session,
-                    excel_session_capture.refresh_windows_excel_session,
-                ):
-                    await asyncio.to_thread(
-                        refresh, excel_session.excel_session_store, force=True
-                    )
-                status = excel_session.excel_session_store.status()
-                if status.get("configured") and not status.get("expired"):
-                    try:
-                        await asyncio.to_thread(
-                            proxy_accounts.proxy_account_store.use_excel
-                        )
-                    except account_balances.BalanceError as exc:
-                        return JSONResponse(
-                            {"detail": str(exc)}, status_code=exc.status_code
-                        )
-            return JSONResponse(
-                content={
-                    **excel_session.excel_session_store.status(),
-                    "capture": excel_session_capture.cached_session_reader_status(),
-                }
-            )
-        try:
-            status = excel_session.excel_session_store.configure(
-                payload.get("headers"),
-                tools_version_id=payload.get("tools_version_id"),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(
-            content={
-                **status,
-                "capture": excel_session_capture.cached_session_reader_status(),
-            }
-        )
-
-    @router.delete("/api/config/excel-session")
-    async def excel_session_clear_api():
-        return JSONResponse(
-            content={
-                **excel_session.excel_session_store.clear(),
-                "capture": excel_session_capture.cached_session_reader_status(),
-            }
-        )
 
     return router
